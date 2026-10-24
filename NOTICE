@@ -1,0 +1,14 @@
+The csq-socks release archive bundles two csqtt clients by amurcanov
+(csqtt is developed at https://github.com/Afteroid/csqttr):
+
+  client-2.1.9  amurcanov's 2.1.9 client, unchanged.
+  client-2.5.1  amurcanov's published 2.5.0 client (commit d02da9b) plus one change,
+                source/02-client-uplink-pin-fix.patch: a speed fix for small UDP packets on upload
+                (offered upstream as Afteroid/csqttr#1).
+
+Required Notice: Copyright 2026 amurcanov.
+Both clients, and the patch as a change to them, are licensed under the PolyForm Noncommercial
+License 1.0.0 (LICENSE-csqtt): free to use and share for non-commercial purposes only.
+Their SHA-256 hashes are in CLIENTS.sha256.
+
+Everything else in this repository is MIT-licensed (LICENSE).
