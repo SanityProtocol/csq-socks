@@ -1,0 +1,179 @@
+--- a/rust-client/auth.rs
++++ b/rust-client/auth.rs
+@@ -675,7 +675,8 @@
+         .timeout(Duration::from_secs(20))
+         .cookie_provider(cookie_jar)
+         .redirect(primp::redirect::Policy::limited(10))
+-        .dns_resolver(dns::global());
++        .dns_resolver(dns::global())
++        .local_address(crate::bind::ip());
+     if captcha_order {
+         let pseudo = PseudoOrder::builder()
+             .push(PseudoId::Method)
+--- a/rust-client/direct_relay.rs
++++ b/rust-client/direct_relay.rs
+@@ -370,7 +370,7 @@
+                     tokio::spawn(async move {
+                         let connect_res = tokio::time::timeout(
+                             Duration::from_secs(5),
+-                            tokio::net::TcpStream::connect(remote_addr),
++                            crate::bind::tcp_connect(remote_addr),
+                         )
+                         .await;
+ 
+@@ -744,11 +744,7 @@
+         let sock = if let Some(s) = existing_sock {
+             s
+         } else {
+-            let bind_addr = if dst_addr.is_ipv6() {
+-                "[::]:0"
+-            } else {
+-                "0.0.0.0:0"
+-            };
++            let bind_addr = crate::bind::local_for(&dst_addr);
+             let Ok(new_sock) = tokio::net::UdpSocket::bind(bind_addr).await else {
+                 return false;
+             };
+@@ -881,7 +877,7 @@
+ 
+         tokio::spawn(async move {
+             let _permit = permit;
+-            let socket = match tokio::net::UdpSocket::bind("0.0.0.0:0").await {
++            let socket = match tokio::net::UdpSocket::bind(crate::bind::local_v4()).await {
+                 Ok(s) => s,
+                 Err(_) => return,
+             };
+--- a/rust-client/dns.rs
++++ b/rust-client/dns.rs
+@@ -309,7 +309,7 @@
+ }
+ 
+ async fn query_dns_server(server: SocketAddr, query: Vec<u8>, query_id: u16) -> Result<DnsAnswer> {
+-    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
++    let socket = UdpSocket::bind(crate::bind::local_v4())
+         .await
+         .context("создание UDP-сокета DNS")?;
+     socket
+--- a/rust-client/main.rs
++++ b/rust-client/main.rs
+@@ -1,6 +1,7 @@
+ #![allow(linker_messages)]
+ 
+ mod auth;
++mod bind;
+ mod captcha;
+ mod captcha_slider;
+ mod cpu_task;
+@@ -119,6 +120,8 @@
+     salt: String,
+     #[arg(long, default_value = "")]
+     tun_uds: String,
++    #[arg(long = "bind-ip", default_value = "")]
++    bind_ip: String,
+     #[arg(long, default_value_t = false)]
+     validate_vk_hashes: bool,
+     #[arg(long = "domain-routing", default_value_t = false)]
+@@ -159,6 +162,15 @@
+         }
+     }));
+     let arguments = Arguments::parse_from(normalized_arguments());
++    if !arguments.bind_ip.is_empty() {
++        match arguments.bind_ip.parse() {
++            Ok(ip) => crate::bind::set(ip),
++            Err(_) => {
++                eprintln!("--bind-ip: not an IPv4 address: {}", arguments.bind_ip);
++                std::process::exit(2);
++            }
++        }
++    }
+     let runtime = match build_runtime(runtime_worker_threads(
+         arguments.workers,
+         arguments.runtime_threads,
+--- a/rust-client/turn.rs
++++ b/rust-client/turn.rs
+@@ -772,11 +772,7 @@
+             let server = dns::resolve_socket(&authority).await?;
+             match endpoint.transport {
+                 TurnWireTransport::Udp => {
+-                    let bind = if server.is_ipv4() {
+-                        SocketAddr::from(([0, 0, 0, 0], 0))
+-                    } else {
+-                        SocketAddr::from(([0u16; 8], 0))
+-                    };
++                    let bind = crate::bind::local_for(&server);
+                     let socket = Arc::new(UdpSocket::bind(bind).await.context("TURN UDP bind")?);
+                     configure_udp_socket_buffers(&socket);
+                     socket
+--- a/rust-client/turn_stream.rs
++++ b/rust-client/turn_stream.rs
+@@ -11,7 +11,6 @@
+ };
+ use tokio::{
+     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf},
+-    net::TcpStream,
+     sync::{mpsc, watch},
+     time::{Duration, timeout},
+ };
+@@ -57,7 +56,7 @@
+     TurnStreamReader,
+     TurnStreamWriteFailure,
+ )> {
+-    let socket = timeout(STREAM_CONNECT_TIMEOUT, TcpStream::connect(server))
++    let socket = timeout(STREAM_CONNECT_TIMEOUT, crate::bind::tcp_connect(server))
+         .await
+         .context("TURN TCP connect timed out")?
+         .with_context(|| format!("TURN {} connect {server}", endpoint.transport.as_str()))?;
+--- a/rust-client/vk_js_calls.rs
++++ b/rust-client/vk_js_calls.rs
+@@ -73,6 +73,7 @@
+         .connect_timeout(Duration::from_secs(8))
+         .redirect(primp::redirect::Policy::limited(5))
+         .dns_resolver(crate::dns::global())
++        .local_address(crate::bind::ip())
+         .build()
+         .context("инициализация браузерного HTTP-клиента")?;
+     let access_token = bootstrap.token;
+--- /dev/null
++++ b/rust-client/bind.rs
+@@ -0,0 +1,41 @@
++//! csq-socks tun on Windows: `--bind-ip` binds every socket that has to leave by the physical network (VK, TURN,
++//! DNS, direct traffic) to that interface's IPv4 address. Under Windows' strong host model a socket bound to an
++//! address sends out the interface that owns it, past the tunnel's 0.0.0.0/1 + 128.0.0.0/1 routes. Unset, nothing
++//! changes.
++use std::net::{IpAddr, Ipv4Addr, SocketAddr};
++use std::sync::OnceLock;
++use tokio::net::{TcpSocket, TcpStream};
++
++static BIND_IP: OnceLock<Ipv4Addr> = OnceLock::new();
++
++pub fn set(ip: Ipv4Addr) {
++    let _ = BIND_IP.set(ip);
++}
++
++pub fn ip() -> Option<IpAddr> {
++    BIND_IP.get().map(|ip| IpAddr::V4(*ip))
++}
++
++/// The local address for a socket towards `peer`: the bound IPv4 for an IPv4 peer, otherwise any address.
++pub fn local_for(peer: &SocketAddr) -> SocketAddr {
++    match (peer, BIND_IP.get()) {
++        (SocketAddr::V4(_), Some(ip)) => SocketAddr::from((*ip, 0)),
++        (SocketAddr::V4(_), None) => SocketAddr::from(([0, 0, 0, 0], 0)),
++        (SocketAddr::V6(_), _) => SocketAddr::from(([0u16; 8], 0)),
++    }
++}
++
++pub fn local_v4() -> SocketAddr {
++    SocketAddr::from((BIND_IP.get().copied().unwrap_or(Ipv4Addr::UNSPECIFIED), 0))
++}
++
++pub async fn tcp_connect(server: SocketAddr) -> std::io::Result<TcpStream> {
++    match (server, BIND_IP.get()) {
++        (SocketAddr::V4(_), Some(ip)) => {
++            let socket = TcpSocket::new_v4()?;
++            socket.bind(SocketAddr::from((*ip, 0)))?;
++            socket.connect(server).await
++        }
++        _ => TcpStream::connect(server).await,
++    }
++}

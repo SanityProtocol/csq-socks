@@ -6,11 +6,17 @@ The csq-socks release archives bundle two csqtt clients by amurcanov
                 upload speed fix, Afteroid/csqttr#1) plus SanityProtocol's 2.5.2 client changes,
                 source/client-2.5.2.patch: battery fixes for an idle tunnel, a downlink wake fix and
                 their review fixes (offered upstream as Afteroid/csqttr#5).
-  On Windows: client-2.1.9.exe and client-2.5.2.exe, the same two sources built for Windows.
+  On Windows: client-2.1.9.exe and client-2.5.2.exe, the same two sources built for Windows plus one
+                change each, source/client-<version>-windows-bind-ip.patch: --bind-ip, which binds the
+                client's own sockets to the physical network for csq-socks tun.
+
+The Windows archive also bundles wintun.dll (Wintun 0.14.1, https://www.wintun.net), WireGuard LLC's
+prebuilt and signed driver, unmodified, under its own licence: LICENSE-wintun.txt.
 
 Required Notice: Copyright 2026 amurcanov.
-Both clients, and the patch as a change to them, are licensed under the PolyForm Noncommercial
+Both clients, and the patches as changes to them, are licensed under the PolyForm Noncommercial
 License 1.0.0 (LICENSE-csqtt): free to use and share for non-commercial purposes only.
 Their SHA-256 hashes are in CLIENTS.sha256.
 
+windows/firewall is adapted from wireguard-windows (MIT, Copyright (C) 2019-2021 WireGuard LLC).
 Everything else in this repository is MIT-licensed (LICENSE).

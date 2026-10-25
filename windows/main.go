@@ -9,8 +9,11 @@
 //	                         -dns: default (the server's DNS), an IP or IP,IP, tls://IP[:PORT][#NAME] (DoT),
 //	                         https://URL (DoH). -X default, or -reset for all.
 //	csq-socks up [PORT]    — connect; then use socks5h://127.0.0.1:PORT
+//	csq-socks tun          — connect as a full tunnel instead (admin terminal): ALL traffic goes through csqtt, no
+//	                         proxy to set; only the client's own VK/TURN traffic leaves directly. If the tunnel dies,
+//	                         traffic is blocked (kill switch) until csq-socks down. See tun.go.
 //	csq-socks status       — client state, tunnel address, exit IP through the proxy, log tail
-//	csq-socks down         — disconnect
+//	csq-socks down         — disconnect (after tun: from an admin terminal, it lifts the kill switch)
 //
 // env (one run, over the settings): PORT (1089), N client streams (10), MTU (1500), DNS (as -dns), WAIT seconds to wait
 //
@@ -43,6 +46,8 @@ import (
 
 	"golang.org/x/sys/windows"
 	"golang.zx2c4.com/wireguard/tun/netstack"
+
+	"csq-socks/firewall"
 )
 
 const version = "1.0.1"
@@ -62,6 +67,7 @@ type state struct {
 	Detail string   `json:"detail,omitempty"`
 	TIP    string   `json:"tunnel_ip,omitempty"`
 	DNS    []string `json:"dns,omitempty"`
+	Phys   string   `json:"physical,omitempty"` // tun: the network the client's own traffic leaves by
 }
 
 func main() {
@@ -80,9 +86,19 @@ func main() {
 			os.Setenv("PORT", args[1])
 		}
 		err = up("socks")
+	case "tun":
+		if !elevated() {
+			err = fmt.Errorf("csq-socks tun needs an admin terminal (Run as administrator, or Windows' sudo)")
+		} else {
+			err = up("tun")
+		}
 	case "status":
 		status()
 	case "down":
+		if s, ok := readState(); ok && s.Mode == "tun" && !elevated() {
+			err = fmt.Errorf("after tun, csq-socks down needs an admin terminal (it lifts the kill switch)")
+			break
+		}
 		down()
 		fmt.Println("down")
 	case "daemon":
@@ -90,7 +106,7 @@ func main() {
 	case "version":
 		fmt.Println("csq-socks", version)
 	default:
-		fmt.Println("usage: csq-socks set | up [PORT] | status | down")
+		fmt.Println("usage: csq-socks set | up [PORT] | tun | status | down")
 		os.Exit(2)
 	}
 	if err != nil {
@@ -203,7 +219,11 @@ func up(mode string) error {
 		return fmt.Errorf("already up (%s) — csq-socks down first", s.Mode)
 	}
 	port := envInt("PORT", loadOpts().eff().Port)
-	if l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port)); err != nil {
+	if mode == "tun" {
+		if err := tunDNSCheck(env("DNS", loadOpts().eff().DNS)); err != nil {
+			return err
+		}
+	} else if l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port)); err != nil {
 		return fmt.Errorf("port %d is in use — pick another: csq-socks up PORT", port)
 	} else {
 		l.Close()
@@ -233,6 +253,11 @@ func up(mode string) error {
 	for i := 0; i < wait*4; i++ {
 		time.Sleep(250 * time.Millisecond)
 		s, ok := readState()
+		if ok && s.Pid == pid && s.Phase == "up" && mode == "tun" {
+			fmt.Printf("up (full tunnel): %s %s, DNS %s; physical network %s\n", adapter, s.TIP, strings.Join(s.DNS, ","), s.Phys)
+			fmt.Printf("exit IP: %s\n", exitIPDirect())
+			return nil
+		}
 		if ok && s.Pid == pid && s.Phase == "up" {
 			fmt.Printf("up: tunnel %s, DNS %s — SOCKS5 on 127.0.0.1:%d (use socks5h:// so names resolve through the tunnel)\n",
 				s.TIP, strings.Join(s.DNS, ","), s.Port)
@@ -260,7 +285,18 @@ func firstNonEmpty(a, b string) string {
 
 func status() {
 	s, ok := readState()
-	if !ok || !alive(s.Pid) {
+	if ok && s.Mode == "tun" && alive(s.Pid) {
+		if s.Phase == "blocked" {
+			fmt.Println("client: not running — " + s.Detail)
+		} else {
+			fmt.Printf("client: %s (Tunnel IP: %s)\n", s.Phase, s.TIP)
+		}
+		fmt.Printf("mode: full tunnel (%s), kill switch on; physical network %s\n", adapter, s.Phys)
+		fmt.Println("settings: " + loadOpts().String())
+		if s.Phase == "up" {
+			fmt.Printf("exit IP: %s\n", exitIPDirect())
+		}
+	} else if !ok || !alive(s.Pid) {
 		fmt.Println("client: not running")
 		fmt.Println("socks: not running")
 	} else if s.Phase != "up" {
@@ -269,8 +305,10 @@ func status() {
 		fmt.Printf("client: running (Tunnel IP: %s)\n", s.TIP)
 		fmt.Printf("socks: 127.0.0.1:%d\n", s.Port)
 	}
-	fmt.Println("settings: " + loadOpts().String())
-	if ok && alive(s.Pid) && s.Phase == "up" {
+	if !(ok && s.Mode == "tun" && alive(s.Pid)) {
+		fmt.Println("settings: " + loadOpts().String())
+	}
+	if ok && s.Mode != "tun" && alive(s.Pid) && s.Phase == "up" {
 		fmt.Printf("exit IP via proxy: %s\n", exitIP(s.Port))
 	}
 	if _, err := os.Stat(logPath); err == nil {
@@ -312,10 +350,13 @@ func logTail(n int) {
 func down() {
 	if s, ok := readState(); ok && alive(s.Pid) {
 		if h, err := windows.OpenProcess(windows.PROCESS_TERMINATE|windows.SYNCHRONIZE, false, uint32(s.Pid)); err == nil {
-			windows.TerminateProcess(h, 0) // the job object takes the client with it
+			windows.TerminateProcess(h, 0) // the job object takes the client with it, the adapter goes with us
 			windows.WaitForSingleObject(h, 5000)
 			windows.CloseHandle(h)
 		}
+	}
+	if elevated() {
+		firewall.Disable() // also what a tun that crashed left
 	}
 	os.Remove(filepath.Join(run, "state.json"))
 }
@@ -359,63 +400,37 @@ func daemon(args []string) error {
 	if c.Line == "2.5" {
 		client, v21 = "client-2.5.2.exe", nil
 	}
-	logf, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		return fail(err.Error())
-	}
-	job, err := killOnClose()
-	if err != nil {
-		return fail("job object: " + err.Error())
-	}
 	cargs := append([]string{"--peer", net.JoinHostPort(c.Host, c.Port), "--vk", strings.Join(c.Hashes, ",")}, v21...)
 	o := loadOpts().eff()
 	cargs = append(cargs, "-n", env("N", strconv.Itoa(o.Streams)), "--listen", "127.0.0.1:0")
-	cmd := exec.Command(filepath.Join(exeDir, client), cargs...)
-	cmd.Env = append(os.Environ(), "CSQTT_PASSWORD="+c.Password)
-	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_NO_WINDOW}
-	pr, pw := io.Pipe()
-	cmd.Stdout, cmd.Stderr = pw, pw
-	if err := cmd.Start(); err != nil {
-		return fail("could not start " + client + ": " + err.Error())
-	}
-	if h, err := windows.OpenProcess(windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE, false, uint32(cmd.Process.Pid)); err == nil {
-		windows.AssignProcessToJobObject(job, h)
-		windows.CloseHandle(h)
-	}
-	exited := make(chan struct{})
-	go func() {
-		err := cmd.Wait()
-		fmt.Fprintf(pw, "client exited %v\n", err)
-		pw.Close()
-		close(exited)
-	}()
-	found := make(chan [3]string, 1) // client port, tunnel IP, DNS
-	go func() {
-		var cport string
-		sc := bufio.NewScanner(pr)
-		sc.Buffer(make([]byte, 1<<16), 1<<20)
-		sent := false
-		for sc.Scan() {
-			l := sc.Text()
-			logf.WriteString(l + "\n")
-			if m := rePort.FindStringSubmatch(l); m != nil && cport == "" {
-				cport = m[1]
-			}
-			if m := reTIP.FindStringSubmatch(l); m != nil && !sent && cport != "" {
-				found <- [3]string{cport, m[1], m[2]}
-				sent = true
-			}
+	clientPath := filepath.Join(exeDir, client)
+	var ph physical
+	if mode == "tun" {
+		if ph, err = physicalNet(); err != nil {
+			return fail(err.Error())
 		}
-	}()
+		if clientPath, err = installClient(client); err != nil {
+			return fail(err.Error())
+		}
+		cargs = append(cargs, "--bind-ip", ph.ip.String()) // its own traffic leaves by the physical network
+	}
+	cl, err := startClient(clientPath, cargs, c.Password)
+	if err != nil {
+		return fail(err.Error())
+	}
 	var f [3]string
 	select {
-	case f = <-found:
-	case <-exited:
+	case f = <-cl.found:
+	case <-cl.exited:
 		return fail("the client exited")
 	}
 	tip, err := netip.ParseAddr(f[1])
 	if err != nil {
 		return fail("bad tunnel IP " + f[1])
+	}
+	cport, _ := strconv.Atoi(f[0])
+	if mode == "tun" {
+		return tunRun(&st, fail, cl, clientPath, cport, tip, strings.Split(firstNonEmpty(f[2], "1.1.1.1"), ","), o, ph)
 	}
 	// DoT/DoH: the proxy asks that server; the stack keeps the server's DNS, for a DoH URL's own host
 	spec, rdns := env("DNS", o.DNS), ""
@@ -437,7 +452,6 @@ func daemon(args []string) error {
 	if err != nil {
 		return fail("network stack: " + err.Error())
 	}
-	cport, _ := strconv.Atoi(f[0])
 	uc, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: cport})
 	if err != nil {
 		return fail("client port: " + err.Error())
@@ -480,7 +494,7 @@ func daemon(args []string) error {
 	}
 	st.Phase, st.TIP = "up", tip.String()
 	if rdns != "" {
-		r := newResolver(rdns, tnet)
+		r := newResolver(rdns, tnet.DialContext)
 		go r.warm()
 		dial = r.dial
 		st.DNS = []string{rdns}
@@ -491,7 +505,62 @@ func daemon(args []string) error {
 	}
 	go serveSocks(ls, dial)
 	writeState(st)
-	<-exited
+	<-cl.exited
 	ls.Close()
 	return fail("the client exited")
+}
+
+type clientRun struct {
+	found  chan [3]string // client port, tunnel IP, DNS
+	exited chan struct{}
+}
+
+// startClient: the client in the job (it goes when this process goes), its output into the log, watched for the
+// UDP port it listens on and the tunnel IP
+func startClient(path string, args []string, password string) (*clientRun, error) {
+	logf, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	job, err := killOnClose()
+	if err != nil {
+		return nil, fmt.Errorf("job object: %v", err)
+	}
+	cmd := exec.Command(path, args...)
+	cmd.Env = append(os.Environ(), "CSQTT_PASSWORD="+password)
+	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_NO_WINDOW}
+	pr, pw := io.Pipe()
+	cmd.Stdout, cmd.Stderr = pw, pw
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("could not start %s: %v", filepath.Base(path), err)
+	}
+	if h, err := windows.OpenProcess(windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE, false, uint32(cmd.Process.Pid)); err == nil {
+		windows.AssignProcessToJobObject(job, h)
+		windows.CloseHandle(h)
+	}
+	cl := &clientRun{found: make(chan [3]string, 1), exited: make(chan struct{})}
+	go func() {
+		err := cmd.Wait()
+		fmt.Fprintf(pw, "client exited %v\n", err)
+		pw.Close()
+		close(cl.exited)
+	}()
+	go func() {
+		var cport string
+		sc := bufio.NewScanner(pr)
+		sc.Buffer(make([]byte, 1<<16), 1<<20)
+		sent := false
+		for sc.Scan() {
+			l := sc.Text()
+			logf.WriteString(l + "\n")
+			if m := rePort.FindStringSubmatch(l); m != nil && cport == "" {
+				cport = m[1]
+			}
+			if m := reTIP.FindStringSubmatch(l); m != nil && !sent && cport != "" {
+				cl.found <- [3]string{cport, m[1], m[2]}
+				sent = true
+			}
+		}
+	}()
+	return cl, nil
 }

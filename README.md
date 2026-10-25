@@ -1,10 +1,10 @@
 # csq-socks
 
-Connect a Linux laptop or server to a **csqtt** server (2.1 or 2.5) from the command line: paste the `csqtt://` link
-you were given, and use the tunnel either as a **SOCKS5 proxy** or as a **full tunnel** for all traffic.
+Connect a Linux or Windows machine to a **csqtt** server (2.1 or 2.5) from the command line: paste the `csqtt://`
+link you were given, and use the tunnel either as a **SOCKS5 proxy** or as a **full tunnel** for all traffic.
 
-Linux x86_64, glibc 2.34+ (Ubuntu 22.04+, Debian 12+), root (sudo). Needs access to VK: csqtt gets its relays
-through VK calls.
+Linux x86_64, glibc 2.34+ (Ubuntu 22.04+, Debian 12+), root (sudo); or Windows 10/11 x64 — see [Windows](#windows).
+Needs access to VK: csqtt gets its relays through VK calls.
 
 ## Install
 
@@ -51,7 +51,7 @@ csq-socks set -reset                                        # all of them
 | setting | default | |
 |---|---|---|
 | `-mtu` | 1500 | 576–1500: the tunnel's packet size. Lower it if pages stall while small requests work. |
-| `-dns` | `default` | `up`: the server's DNS; `tun`: your system's DNS, through the tunnel. Or an IP (`1.1.1.1`, `1.1.1.1,8.8.8.8`), DoT `tls://IP[#name]`, or DoH `https://…` (`up` only). In `tun`, a DNS setting needs systemd-resolved (Ubuntu, most desktops). |
+| `-dns` | `default` | `up`: the server's DNS; `tun`: your system's DNS, through the tunnel. Or an IP (`1.1.1.1`, `1.1.1.1,8.8.8.8`), DoT `tls://IP[#name]`, or DoH `https://…` (on Linux `up` only). In `tun` on Linux, a DNS setting needs systemd-resolved (Ubuntu, most desktops). |
 | `-port` | 1089 | the proxy's port (`csq-socks up 1095` still picks one for a single run) |
 | `-streams` | 10 | 3–100 parallel csqtt streams |
 
@@ -67,6 +67,29 @@ The settings stay in `~/.config/csq-socks/settings.json`; a new link keeps them.
   csqtt app (LaLune can leave clients running after you quit it: `sudo pkill -f '[c]lient-linux-x86_64'`), wait a few
   minutes, try again. `up` waits up to 4 minutes on its own (`WAIT=360 csq-socks up` for longer); don't Ctrl-C it.
 - Something wrong in `tun` mode and `down` does not help: reboot — nothing csq-socks sets survives a restart.
+
+## Windows
+
+Download `csq-socks-windows.zip` from [Releases](https://github.com/SanityProtocol/csq-socks/releases), unpack it
+anywhere (say `C:\csq-socks`), and run it from a terminal in that folder — nothing to install. The same commands and
+settings as on Linux:
+
+```powershell
+.\csq-socks set      # paste your csqtt:// link (saved in %APPDATA%\csq-socks)
+.\csq-socks up       # SOCKS5 proxy on 127.0.0.1:1089 — no admin rights needed
+.\csq-socks tun      # or: ALL traffic through the tunnel — from an admin terminal (Run as administrator)
+.\csq-socks status
+.\csq-socks down     # after tun: from an admin terminal too
+```
+
+- `up` changes nothing on the system, as on Linux: point a browser or app at `127.0.0.1:1089` (SOCKS v5, DNS through
+  the proxy).
+- `tun` adds a network adapter named `csq-socks` and routes everything through it. The csqtt client is copied to
+  `C:\Program Files\csq-socks` and only its own VK traffic goes out directly. The kill switch blocks everything else
+  (your local network stays reachable) if the tunnel drops, even if csq-socks itself is closed, until
+  `csq-socks down` — or a restart. In `tun` every `-dns` form works, DoT and DoH included.
+- After moving to another network (Wi-Fi to cable, a new address): `csq-socks down`, then `csq-socks tun` again.
+- `tun` uses Wintun (`wintun.dll`, unmodified, under its own licence: `LICENSE-wintun.txt`).
 
 ## Licence
 
@@ -88,6 +111,11 @@ curl -fsSL https://github.com/SanityProtocol/csq-socks/releases/latest/download/
 ```
 
 Удаление: `sudo /opt/csq-socks/install.sh uninstall`
+
+Windows: скачайте `csq-socks-windows.zip` из Releases, распакуйте в любую папку и запускайте `.\csq-socks …` из
+терминала в ней — команды те же. `up` работает без прав администратора; `tun` и `down` после него — из терминала
+администратора. При обрыве туннеля в режиме `tun` трафик блокируется (локальная сеть доступна) до `csq-socks down`
+или перезагрузки — даже если сам csq-socks закрыт. После смены сети: `csq-socks down`, затем `csq-socks tun`.
 
 ```bash
 csq-socks set      # вставить ссылку csqtt:// и нажать Enter

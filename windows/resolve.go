@@ -1,6 +1,7 @@
 package main
 
-// DoT / DoH lookups for the proxy (csq-socks set -dns tls://… or https://…), inside the tunnel like everything else.
+// DoT / DoH (csq-socks set -dns tls://… or https://…), inside the tunnel like everything else: lookups for the proxy in
+// up, and in tun a forwarder on 127.0.0.1:53 that the tunnel adapter's DNS points at.
 // One connection to the server, kept open and reused: a fresh TCP+TLS handshake through the tunnel per lookup took
 // 1–7 s and a quarter of them stalled. Queries take turns on it; one the server closed meanwhile is retried once.
 
@@ -18,14 +19,12 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"golang.zx2c4.com/wireguard/tun/netstack"
 )
 
 type resolver struct {
-	spec string
-	tnet *netstack.Net
-	hc   *http.Client // DoH; its transport keeps the connection
+	spec    string
+	dialTCP func(ctx context.Context, network, addr string) (net.Conn, error) // up: the userspace stack; tun: the OS
+	hc      *http.Client                                                      // DoH; its transport keeps the connection
 
 	mu  sync.Mutex
 	dot *tls.Conn
@@ -39,11 +38,11 @@ type cached struct {
 	exp time.Time
 }
 
-func newResolver(spec string, tnet *netstack.Net) *resolver {
-	r := &resolver{spec: spec, tnet: tnet, cache: map[string]cached{}}
+func newResolver(spec string, dialTCP func(ctx context.Context, network, addr string) (net.Conn, error)) *resolver {
+	r := &resolver{spec: spec, dialTCP: dialTCP, cache: map[string]cached{}}
 	if strings.HasPrefix(spec, "https://") {
 		r.hc = &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{
-			DialContext: tnet.DialContext, ForceAttemptHTTP2: true, IdleConnTimeout: 5 * time.Minute}}
+			DialContext: dialTCP, ForceAttemptHTTP2: true, IdleConnTimeout: 5 * time.Minute}}
 	}
 	return r
 }
@@ -99,7 +98,7 @@ func (r *resolver) dotOpen() (*tls.Conn, error) {
 	addr, name, _ := dotAddr(r.spec)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	raw, err := r.tnet.DialContext(ctx, "tcp", addr)
+	raw, err := r.dialTCP(ctx, "tcp", addr)
 	if err != nil {
 		return nil, err
 	}
@@ -206,9 +205,27 @@ func (r *resolver) dial(ctx context.Context, host string, port uint16) (net.Conn
 	err := errors.New("no address")
 	for _, ip := range ips {
 		var c net.Conn
-		if c, err = r.tnet.DialContextTCPAddrPort(ctx, netip.AddrPortFrom(ip, port)); err == nil {
+		if c, err = r.dialTCP(ctx, "tcp", netip.AddrPortFrom(ip, port).String()); err == nil {
 			return c, nil
 		}
 	}
 	return nil, err
+}
+
+// serveDNS: tun's forwarder — each query as it came (any type), over the kept DoT/DoH connection, the answer back
+func (r *resolver) serveDNS(pc net.PacketConn) {
+	buf := make([]byte, 4096)
+	for {
+		n, from, err := pc.ReadFrom(buf)
+		if err != nil {
+			return
+		}
+		q := append([]byte(nil), buf[:n]...)
+		go func() {
+			if m, err := r.ask(q); err == nil && len(m) >= 2 && len(q) >= 2 {
+				m[0], m[1] = q[0], q[1] // the asker's ID
+				pc.WriteTo(m, from)
+			}
+		}()
+	}
 }
