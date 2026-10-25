@@ -5,7 +5,7 @@
 set -eu
 cd "$(dirname "$0")"
 sha256sum -c --quiet CLIENTS.sha256 || { echo "the client binaries are missing or do not match CLIENTS.sha256"; exit 1; }
-files=(csq-socks install.sh link.py socks5.py tunfd.py client-2.5.2 client-2.1.9 README.md LICENSE LICENSE-csqtt NOTICE
+files=(csq-socks install.sh link.py socks5.py tunfd.py client-2.5.2 client-2.1.9 README.md README.en.md LICENSE LICENSE-csqtt NOTICE
        VERSION CLIENTS.sha256 source/client-2.5.2.patch)
 rm -rf dist; mkdir -p dist/csq-socks/source
 for f in "${files[@]}"; do cp -p "$f" "dist/csq-socks/$f"; done
@@ -15,7 +15,7 @@ docker run --rm -v "$PWD/windows:/w" -v "$HOME/.cache/csq-socks-go:/gomod" -e GO
   -e GOCACHE=/gomod/.buildcache -e GOOS=windows -e GOARCH=amd64 -e CGO_ENABLED=0 -w /w -u "$(id -u):$(id -g)" -e HOME=/tmp \
   golang:1.27.1-bookworm go build -trimpath -ldflags="-s -w" -o csq-socks.exe .
 grep -q "const version = \"$(cat VERSION)\"" windows/main.go || { echo "windows/main.go's version is not $(cat VERSION)"; exit 1; }
-win=(windows/csq-socks.exe client-2.5.2.exe client-2.1.9.exe wintun.dll README.md LICENSE LICENSE-csqtt LICENSE-wintun.txt
+win=(windows/csq-socks.exe client-2.5.2.exe client-2.1.9.exe wintun.dll README.md README.en.md LICENSE LICENSE-csqtt LICENSE-wintun.txt
      NOTICE VERSION CLIENTS.sha256 source/client-2.5.2.patch source/client-2.5.2-windows-bind-ip.patch
      source/client-2.1.9-windows-bind-ip.patch)
 mkdir -p dist/csq-socks-windows/source

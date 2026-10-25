@@ -1,143 +1,110 @@
 # csq-socks
 
-Connect a Linux or Windows machine to a **csqtt** server (2.1 or 2.5) from the command line: paste the `csqtt://`
-link you were given, and use the tunnel either as a **SOCKS5 proxy** or as a **full tunnel** for all traffic.
+**Русский** | [English](README.en.md)
 
-Linux x86_64, glibc 2.34+ (Ubuntu 22.04+, Debian 12+), root (sudo); or Windows 10/11 x64 — see [Windows](#windows).
-Needs access to VK: csqtt gets its relays through VK calls.
+Подключение компьютера с Linux или Windows к серверу **csqtt** (2.1 или 2.5) из командной строки: вставьте полученную
+ссылку `csqtt://` и пользуйтесь туннелем как **SOCKS5-прокси** или как **полным туннелем** для всего трафика.
 
-## Install
+Linux x86_64, glibc 2.34+ (Ubuntu 22.04+, Debian 12+), права root (sudo); или Windows 10/11 x64 — см. [Windows](#windows).
+Нужен доступ к VK: csqtt получает ретрансляторы через звонки VK.
+
+## Установка
 
 ```bash
 curl -fsSL https://github.com/SanityProtocol/csq-socks/releases/latest/download/csq-socks.tar.gz | tar xz -C /tmp && sudo /tmp/csq-socks/install.sh
 ```
 
-The same command updates an installed copy. Without internet on that machine: download `csq-socks.tar.gz` from
-[Releases](https://github.com/SanityProtocol/csq-socks/releases), copy it over, then
+Та же команда обновляет установленную копию. Если на этой машине нет интернета: скачайте `csq-socks.tar.gz` из
+[Releases](https://github.com/SanityProtocol/csq-socks/releases), перенесите его туда и выполните
 `tar xzf csq-socks.tar.gz && sudo csq-socks/install.sh`.
 
-Remove: `sudo /opt/csq-socks/install.sh uninstall`.
+Удаление: `sudo /opt/csq-socks/install.sh uninstall`.
 
-## Use
+## Использование
 
 ```bash
-csq-socks set      # paste your csqtt:// link, press Enter (saved to ~/.config/csq-socks/conn.json, only you can read it)
-csq-socks up       # SOCKS5 proxy on 127.0.0.1:1089  (csq-socks up 1095 = another port)
-csq-socks tun      # or: ALL traffic through the tunnel, nothing to configure
-csq-socks status   # connected or not, your exit IP, the client's last log lines
-csq-socks down     # disconnect, everything back to normal
+csq-socks set      # вставить ссылку csqtt:// и нажать Enter (сохраняется в ~/.config/csq-socks/conn.json, читать её можете только вы)
+csq-socks up       # SOCKS5-прокси на 127.0.0.1:1089  (csq-socks up 1095 — другой порт)
+csq-socks tun      # или: ВЕСЬ трафик через туннель, ничего настраивать не нужно
+csq-socks status   # подключено или нет, ваш внешний IP, последние строки лога клиента
+csq-socks down     # отключиться, всё возвращается как было
 ```
 
-**Proxy mode (`up`)** changes nothing on the system: only what you point at `127.0.0.1:1089` uses the tunnel.
+**Режим прокси (`up`)** ничего в системе не меняет: через туннель идёт только то, что направлено на `127.0.0.1:1089`.
 
-- Firefox: Settings → Network Settings → Manual proxy → SOCKS Host `127.0.0.1`, Port `1089`, SOCKS v5,
-  tick *Proxy DNS when using SOCKS v5*.
-- Chrome: `google-chrome --proxy-server="socks5://127.0.0.1:1089"` (with no other Chrome window open).
+- Firefox: Настройки → Параметры сети → Ручная настройка прокси → Узел SOCKS `127.0.0.1`, Порт `1089`, SOCKS v5,
+  отметьте *Отправлять DNS-запросы через прокси при использовании SOCKS v5*.
+- Chrome: `google-chrome --proxy-server="socks5://127.0.0.1:1089"` (когда других окон Chrome не открыто).
 - ssh: `ssh -o ProxyCommand='nc -X 5 -x 127.0.0.1:1089 %h %p' user@host`
 - curl: `curl --socks5-hostname 127.0.0.1:1089 https://ifconfig.me`
 
-**Full tunnel (`tun`)** sends all traffic, DNS included, through csqtt; your local network stays reachable. The client
-runs as system user `csqs`, and only its own VK traffic goes out directly. If the tunnel drops, traffic is **blocked**,
-not leaked, until `csq-socks down`. Turn other VPNs off first: while `tun` is up it takes priority over them.
+**Полный туннель (`tun`)** пропускает через csqtt весь трафик, включая DNS; локальная сеть остаётся доступной. Клиент
+работает от системного пользователя `csqs`, и напрямую уходит только его собственный трафик к VK. Если туннель
+обрывается, трафик **блокируется**, а не утекает, до `csq-socks down`. Сначала выключите другие VPN: пока `tun`
+работает, он важнее их.
 
-## Settings
+## Настройки
 
 ```bash
-csq-socks set -mtu 1400 -dns tls://9.9.9.9#dns.quad9.net   # with a link saved, only the settings change
-csq-socks set -dns default                                  # one setting back to its default
-csq-socks set -reset                                        # all of them
+csq-socks set -mtu 1400 -dns tls://9.9.9.9#dns.quad9.net   # ссылка уже сохранена — меняются только настройки
+csq-socks set -dns default                                  # одну настройку — к значению по умолчанию
+csq-socks set -reset                                        # все
 ```
 
-| setting | default | |
+| настройка | по умолчанию | |
 |---|---|---|
-| `-mtu` | 1500 | 576–1500: the tunnel's packet size. Lower it if pages stall while small requests work. |
-| `-dns` | `default` | `up`: the server's DNS; `tun`: your system's DNS, through the tunnel. Or an IP (`1.1.1.1`, `1.1.1.1,8.8.8.8`), DoT `tls://IP[#name]`, or DoH `https://…` (on Linux `up` only). In `tun` on Linux, a DNS setting needs systemd-resolved (Ubuntu, most desktops). |
-| `-port` | 1089 | the proxy's port (`csq-socks up 1095` still picks one for a single run) |
-| `-streams` | 10 | 3–100 parallel csqtt streams |
+| `-mtu` | 1500 | 576–1500: размер пакета в туннеле. Уменьшите, если страницы зависают, а мелкие запросы проходят. |
+| `-dns` | `default` | `up`: DNS сервера; `tun`: DNS вашей системы, через туннель. Или IP (`1.1.1.1`, `1.1.1.1,8.8.8.8`), DoT `tls://IP[#имя]` или DoH `https://…` (в Linux — только `up`). Только IPv4: туннель не передаёт IPv6. В режиме `tun` в Linux DNS-настройка требует systemd-resolved (Ubuntu, большинство десктопов). |
+| `-port` | 1089 | порт прокси (`csq-socks up 1095` по-прежнему задаёт его на один запуск) |
+| `-streams` | 10 | 3–100 параллельных потоков csqtt |
 
-The settings stay in `~/.config/csq-socks/settings.json`; a new link keeps them. `csq-socks status` shows them.
+Настройки хранятся в `~/.config/csq-socks/settings.json`; новая ссылка их не сбрасывает. Показывает их `csq-socks status`.
 
-## Good to know
+## Полезно знать
 
-- **The link picks the client.** A readable `csqtt://connect?…` link is a 2.1 server; a long scrambled `csqtt://…`
-  link is a 2.5 server. A 2.1 link only works with a 2.1 server, a 2.5 link only with a 2.5 server.
-- **A 2.1 link is tied to one device.** If the same link is already used in an app (LaLune, FOCSQ, the phone app),
-  a 2.1 server may refuse this one or drop the other. Ask for a separate link.
-- **Stuck at "connecting…" with "Flood control" in `csq-socks status`?** VK is limiting your IP. Close every other
-  csqtt app (LaLune can leave clients running after you quit it: `sudo pkill -f '[c]lient-linux-x86_64'`), wait a few
-  minutes, try again. `up` waits up to 4 minutes on its own (`WAIT=360 csq-socks up` for longer); don't Ctrl-C it.
-- Something wrong in `tun` mode and `down` does not help: reboot — nothing csq-socks sets survives a restart.
+- **Ссылка выбирает клиента.** Читаемая ссылка `csqtt://connect?…` — это сервер 2.1; длинная нечитаемая `csqtt://…` —
+  сервер 2.5. Ссылка 2.1 работает только с сервером 2.1, ссылка 2.5 — только с сервером 2.5.
+- **Ссылка 2.1 привязана к одному устройству.** Если та же ссылка уже используется в приложении (LaLune, FOCSQ,
+  приложение на телефоне), сервер 2.1 может отказать этой или отключить другую. Попросите отдельную ссылку.
+- **Зависло на «connecting…», а в `csq-socks status` — «Flood control»?** VK ограничивает ваш IP. Закройте все другие
+  приложения csqtt (LaLune может оставлять клиенты запущенными после выхода: `sudo pkill -f '[c]lient-linux-x86_64'`),
+  подождите несколько минут и повторите. `up` сам ждёт до 4 минут (`WAIT=360 csq-socks up` — дольше); не прерывайте
+  его через Ctrl-C.
+- Что-то не так в режиме `tun`, и `down` не помогает: перезагрузитесь — ничего из того, что меняет csq-socks,
+  перезагрузку не переживает.
 
 ## Windows
 
-Download `csq-socks-windows.zip` from [Releases](https://github.com/SanityProtocol/csq-socks/releases), unpack it
-anywhere (say `C:\csq-socks`), and run it from a terminal in that folder — nothing to install. The same commands and
-settings as on Linux:
+Скачайте `csq-socks-windows.zip` из [Releases](https://github.com/SanityProtocol/csq-socks/releases), распакуйте в любую
+папку (например, `C:\csq-socks`) и запускайте из терминала в этой папке — устанавливать ничего не нужно. Команды и
+настройки те же, что в Linux:
 
 ```powershell
-.\csq-socks set      # paste your csqtt:// link (saved in %APPDATA%\csq-socks)
-.\csq-socks up       # SOCKS5 proxy on 127.0.0.1:1089 — no admin rights needed
-.\csq-socks tun      # or: ALL traffic through the tunnel — from an admin terminal (Run as administrator)
+.\csq-socks set      # вставить ссылку csqtt:// (сохраняется в %APPDATA%\csq-socks)
+.\csq-socks up       # SOCKS5-прокси на 127.0.0.1:1089 — права администратора не нужны
+.\csq-socks tun      # или: ВЕСЬ трафик через туннель — из терминала администратора («Запуск от имени администратора»)
 .\csq-socks status
-.\csq-socks down     # after tun: from an admin terminal too
+.\csq-socks down     # после tun — тоже из терминала администратора
 ```
 
-- `up` changes nothing on the system, as on Linux: point a browser or app at `127.0.0.1:1089` (SOCKS v5, DNS through
-  the proxy).
-- `tun` adds a network adapter named `csq-socks` and routes everything through it. The csqtt client is copied to
-  `C:\Program Files\csq-socks` and only its own VK traffic goes out directly. The kill switch blocks everything else
-  (your local network stays reachable) if the tunnel drops, even if csq-socks itself is closed, until
-  `csq-socks down` — or a restart. In `tun` every `-dns` form works, DoT and DoH included.
-- Another network (Wi-Fi to cable, a new address): `tun` follows it on its own — traffic stays blocked for the few
-  seconds it reconnects.
-- Only an elevated client gets past the kill switch: a program that starts the client exe unelevated gets nothing.
-- Not covered: traffic Windows forwards for others (WSL2, Hyper-V's Default Switch, Internet Connection Sharing)
-  while csq-socks itself is not running — it is not this machine's own traffic, which the kill switch filters.
-- `tun` uses Wintun (`wintun.dll`, unmodified, under its own licence: `LICENSE-wintun.txt`).
+- `up`, как и в Linux, ничего в системе не меняет: укажите в браузере или приложении `127.0.0.1:1089` (SOCKS v5,
+  DNS через прокси).
+- `tun` добавляет сетевой адаптер `csq-socks` и направляет через него всё. Клиент csqtt копируется в
+  `C:\Program Files\csq-socks`, и напрямую уходит только его собственный трафик к VK. Если туннель обрывается,
+  блокировка (kill switch) закрывает всё остальное (локальная сеть остаётся доступной) — даже если закрыт сам
+  csq-socks — до `csq-socks down` или перезагрузки. В `tun` работают все формы `-dns`, включая DoT и DoH.
+- Другая сеть (Wi-Fi вместо кабеля, новый адрес): `tun` переключается сам — на несколько секунд переподключения
+  трафик остаётся заблокированным.
+- Через блокировку проходит только клиент, запущенный с правами администратора: программа, которая запустит exe
+  клиента без них, не получит ничего.
+- Не покрывается: трафик, который Windows пересылает для других (WSL2, Default Switch в Hyper-V, общий доступ
+  к подключению к интернету), пока сам csq-socks не запущен — это не собственный трафик этого компьютера, который
+  фильтрует блокировка.
+- `tun` использует Wintun (`wintun.dll`, без изменений, под собственной лицензией: `LICENSE-wintun.txt`).
 
-## Licence
+## Лицензия
 
-The csq-socks scripts are MIT (`LICENSE`). The two csqtt clients in the release archive are amurcanov's, under the
-PolyForm Noncommercial License — non-commercial use only (`NOTICE`, `LICENSE-csqtt`). They are not in git:
-`release.sh` builds the archive from this repository plus the two binaries, checked against `CLIENTS.sha256`.
-
----
-
-## По-русски
-
-Подключение Linux к серверу **csqtt** (2.1 или 2.5) из командной строки: вставьте полученную ссылку `csqtt://`
-и пользуйтесь туннелем как **SOCKS5-прокси** или как **полным туннелем** для всего трафика.
-
-Установка (и обновление):
-
-```bash
-curl -fsSL https://github.com/SanityProtocol/csq-socks/releases/latest/download/csq-socks.tar.gz | tar xz -C /tmp && sudo /tmp/csq-socks/install.sh
-```
-
-Удаление: `sudo /opt/csq-socks/install.sh uninstall`
-
-Windows: скачайте `csq-socks-windows.zip` из Releases, распакуйте в любую папку и запускайте `.\csq-socks …` из
-терминала в ней — команды те же. `up` работает без прав администратора; `tun` и `down` после него — из терминала
-администратора. При обрыве туннеля в режиме `tun` трафик блокируется (локальная сеть доступна) до `csq-socks down`
-или перезагрузки — даже если сам csq-socks закрыт. При смене сети `tun` переподключается сам.
-Не покрывается: трафик, который Windows пересылает для других (WSL2, Hyper-V Default Switch, общий доступ к
-подключению), пока сам csq-socks не запущен.
-
-```bash
-csq-socks set      # вставить ссылку csqtt:// и нажать Enter
-csq-socks up       # SOCKS5-прокси на 127.0.0.1:1089
-csq-socks tun      # или: весь трафик через туннель
-csq-socks status   # состояние, внешний IP, последние строки лога
-csq-socks down     # отключиться
-```
-
-- В режиме `up` система не меняется: через туннель идёт только то, что направлено на `127.0.0.1:1089`
-  (в Firefox — SOCKS v5 и «Отправлять DNS-запросы через прокси»).
-- В режиме `tun` весь трафик и DNS идут через csqtt; при обрыве туннеля трафик **блокируется** до `csq-socks down`.
-  Другие VPN на это время выключите.
-- Настройки: `csq-socks set -mtu 1400 -dns tls://9.9.9.9#dns.quad9.net` (ссылка уже сохранена — меняются только
-  настройки), `-port`, `-streams`; `-X default` возвращает одну, `-reset` — все. DNS: IP, DoT `tls://IP[#имя]`
-  или DoH `https://…` (только `up`); в режиме `tun` DNS-настройка требует systemd-resolved. Показывает `csq-socks status`.
-- Ссылка 2.1 привязана к одному устройству: если она уже используется в другом приложении, попросите отдельную.
-- Зависло на «connecting…», а в `csq-socks status` — «Flood control»: VK ограничил ваш IP. Закройте другие клиенты
-  csqtt, подождите несколько минут и повторите; не прерывайте `up` через Ctrl-C.
+Скрипты csq-socks — под лицензией MIT (`LICENSE`). Два клиента csqtt в архивах релиза принадлежат amurcanov и
+распространяются под PolyForm Noncommercial License — только для некоммерческого использования (`NOTICE`,
+`LICENSE-csqtt`). В git их нет: `release.sh` собирает архивы из этого репозитория и бинарных файлов, сверяя их
+с `CLIENTS.sha256`.
