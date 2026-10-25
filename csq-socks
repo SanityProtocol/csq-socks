@@ -58,7 +58,7 @@ up(){   # $1 = socks | tun
   local line host pport pw vk client v21=() peer tip dns i bin runas
   line=$(field line) host=$(field host) pport=$(field port) pw=$(field password) vk=$(field hashes)
   case $host in *:*) peer="[$host]:$pport";; *) peer="$host:$pport";; esac
-  if [ "$line" = 2.5 ]; then client=client-2.5.1; else client=client-2.1.9; v21=(--password "$pw" --device-id "${DEVID:-csq-socks}"); fi
+  if [ "$line" = 2.5 ]; then client=client-2.5.2; else client=client-2.1.9; v21=(--password "$pw" --device-id "${DEVID:-csq-socks}"); fi
   down >/dev/null 2>&1
   mkdir -p "$RUN"; echo "$p" > "$RUN/port"; echo "$mode" > "$RUN/mode"; : > "$LOG"; chown "$U:$G" "$LOG"; chmod 600 "$LOG"
   bin=$D/$client runas=("${asuser[@]}")

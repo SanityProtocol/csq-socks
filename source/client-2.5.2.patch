@@ -1,0 +1,257 @@
+diff --git a/rust-client/direct_relay.rs b/rust-client/direct_relay.rs
+index f5543f7..de5829f 100644
+--- a/rust-client/direct_relay.rs
++++ b/rust-client/direct_relay.rs
+@@ -1295,6 +1295,17 @@ mod tests {
+ 
+     #[tokio::test]
+     async fn test_smoltcp_direct_tcp_syn() {
++        smoltcp_syn_gets_syn_ack(Duration::ZERO).await;
++    }
++
++    // An idle stack with no socket waits only on its notify (no 5 ms re-poll): the first SYN after a quiet spell must
++    // still wake it.
++    #[tokio::test]
++    async fn test_smoltcp_direct_tcp_syn_after_idle() {
++        smoltcp_syn_gets_syn_ack(Duration::from_millis(300)).await;
++    }
++
++    async fn smoltcp_syn_gets_syn_ack(idle: Duration) {
+         let domain_routing = Arc::new(ArcSwap::from_pointee(
+             crate::dispatcher::DomainRoutingConfig {
+                 enabled: true,
+@@ -1327,6 +1338,7 @@ mod tests {
+             .direct_ips
+             .store(Arc::new(std::iter::once(dst.ip()).collect()));
+ 
++        tokio::time::sleep(idle).await;
+         let syn_raw = build_tcp_packet(src, dst, 1000, 0, 0x02, &[]).unwrap();
+         let mut pkt = pool.try_acquire().unwrap();
+         pkt.extend_tail(syn_raw.len())
+diff --git a/rust-client/dispatcher.rs b/rust-client/dispatcher.rs
+index 9dce915..ecdc583 100644
+--- a/rust-client/dispatcher.rs
++++ b/rust-client/dispatcher.rs
+@@ -817,7 +817,6 @@ impl Dispatcher {
+     }
+ 
+     pub fn push_inbound(&self, packet: PacketBuf) {
+-        let wake = self.inbound.len() <= 2;
+         let mut packet = packet;
+         if let Err(returned) = self.inbound.push(packet) {
+             packet = returned;
+@@ -832,9 +831,10 @@ impl Dispatcher {
+                 );
+             }
+         }
+-        if wake {
+-            self.tun_wake.notify_one();
+-        }
++        // After the push, every time: deciding from the length BEFORE it lost a wakeup — the writers could drain the
++        // queue and park between that check and the push, and the packet then waited for the next downlink packet.
++        // Notify coalesces into one stored permit, so this costs nothing when nobody waits.
++        self.tun_wake.notify_one();
+     }
+ 
+     pub fn return_packet(&self, mut packet: PacketBuf) {
+@@ -2202,6 +2202,46 @@ mod tests {
+         assert_eq!(second.as_slice()[19], 3);
+     }
+ 
++    #[tokio::test]
++    async fn test_push_inbound_wakes_the_writer_whatever_the_queue_length() {
++        let profile = QueueProfile::for_worker_count(1);
++        let pool = PacketPool::new(profile.inbound_capacity + 8);
++        let dispatcher = Dispatcher {
++            workers: ArcSwap::from_pointee(Vec::new()),
++            inbound: ArrayQueue::new(profile.inbound_capacity),
++            outbound_capacity: profile.outbound_capacity,
++            tun_wake: Arc::new(Notify::new()),
++            tun_io_lost: Arc::new(Notify::new()),
++            cancel: CancellationToken::new(),
++            tasks: tokio::sync::Mutex::new(Vec::new()),
++            domain_routing: Arc::new(ArcSwap::from_pointee(DomainRoutingConfig::default())),
++            direct_ips: Arc::new(ArcSwap::from_pointee(HashSet::new())),
++            dns_domain_map: Arc::new(crate::sni::DnsDomainMap::default()),
++            direct_relay: None,
++            uplink_state: Mutex::new(UplinkState::new()),
++            pool: pool.clone(),
++            reassembler: crate::wire_protocol::ShardedReassembler::new(),
++            next_frag_id: std::sync::atomic::AtomicU16::new(1),
++            termination: Arc::new(OnceLock::new()),
++        };
++        let packet = || {
++            let mut p = pool.acquire();
++            p.set_read_len(60).unwrap();
++            p.as_mut_slice()[0] = 0x45;
++            p
++        };
++        // three already queued (more than the old "<= 2" threshold), the writer's permit consumed: it is parked
++        for _ in 0..3 {
++            dispatcher.push_inbound(packet());
++        }
++        let wait = std::time::Duration::from_millis(50);
++        assert!(tokio::time::timeout(wait, dispatcher.tun_wake.notified()).await.is_ok());
++        assert!(tokio::time::timeout(wait, dispatcher.tun_wake.notified()).await.is_err());
++        // the next packet must wake it — before the fix it waited for the next downlink packet
++        dispatcher.push_inbound(packet());
++        assert!(tokio::time::timeout(wait, dispatcher.tun_wake.notified()).await.is_ok());
++    }
++
+     #[tokio::test]
+     async fn test_dispatch_malformed_packets_safety() {
+         let pool = PacketPool::new(16);
+diff --git a/rust-client/stats.rs b/rust-client/stats.rs
+index 893bd50..5777a4d 100644
+--- a/rust-client/stats.rs
++++ b/rust-client/stats.rs
+@@ -5,6 +5,19 @@ use std::sync::{
+ };
+ use tokio_util::sync::CancellationToken;
+ 
++// STATS is read by the app (the worker count its recovery watches, the traffic line, the 10 s VPN start retry); one
++// that repeats the last tells it nothing. It goes out on the tick after any change, so a change still reaches the app
++// within 500 ms, and otherwise every 3 s (2.1.9's rate: the retry may run up to 2.5 s later) instead of twice a second
++// for the whole life of an idle tunnel, each line waking the app's reader and main thread.
++const TICK: std::time::Duration = std::time::Duration::from_millis(500);
++const HEARTBEAT_TICKS: u32 = 6;
++
++type Snapshot = (i32, i64, i64);
++
++fn should_emit(last: Option<Snapshot>, now: Snapshot, ticks_since_emit: u32) -> bool {
++    last != Some(now) || ticks_since_emit >= HEARTBEAT_TICKS
++}
++
+ #[derive(Default)]
+ pub struct Stats {
+     pub total_bytes_up: AtomicI64,
+@@ -14,9 +27,11 @@ pub struct Stats {
+ 
+ impl Stats {
+     pub async fn run(self: Arc<Self>, events: Events, cancel: CancellationToken) {
+-        let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
++        let mut interval = tokio::time::interval(TICK);
+         interval.tick().await;
+         let mut log_counter = 0u32;
++        let mut last_emitted: Option<Snapshot> = None;
++        let mut ticks_since_emit = 0u32;
+         loop {
+             tokio::select! {
+                 _ = cancel.cancelled() => return,
+@@ -25,14 +40,43 @@ impl Stats {
+                     let up = self.total_bytes_up.load(Ordering::Relaxed);
+                     let down = self.total_bytes_down.load(Ordering::Relaxed);
+                     log_counter += 1;
+-                    if log_counter >= 6 {
+-                        log_counter = 0;
+-                        let total_mb = (up + down) as f64 / (1024.0 * 1024.0);
+-                        crate::log_error!("[СТАТИСТИКА] Активных: {active} | Трафик: {total_mb:.2} МБ");
++                    ticks_since_emit += 1;
++                    let now = (active, up, down);
++                    if should_emit(last_emitted, now, ticks_since_emit) {
++                        events.stats(active, up, down);
++                        last_emitted = Some(now);
++                        ticks_since_emit = 0;
++                        // the log line (stderr) rides on a STATS tick: on an idle tunnel both go out together every
++                        // 3 s, one wakeup of the app's reader instead of two 500 ms apart
++                        if log_counter >= HEARTBEAT_TICKS {
++                            log_counter = 0;
++                            let total_mb = (up + down) as f64 / (1024.0 * 1024.0);
++                            crate::log_error!("[СТАТИСТИКА] Активных: {active} | Трафик: {total_mb:.2} МБ");
++                        }
+                     }
+-                    events.stats(active, up, down);
+                 }
+             }
+         }
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn stats_sent_on_change_and_every_3s_otherwise() {
++        // The first tick always goes out.
++        assert!(should_emit(None, (0, 0, 0), 1));
++        // Unchanged: held until the 6th tick (3 s), then sent.
++        for ticks in 1..HEARTBEAT_TICKS {
++            assert!(!should_emit(Some((10, 5, 7)), (10, 5, 7), ticks));
++        }
++        assert!(should_emit(Some((10, 5, 7)), (10, 5, 7), HEARTBEAT_TICKS));
++        // Any change goes out on the next tick: the worker count, either byte counter.
++        assert!(should_emit(Some((10, 5, 7)), (9, 5, 7), 1));
++        assert!(should_emit(Some((10, 5, 7)), (10, 6, 7), 1));
++        assert!(should_emit(Some((10, 5, 7)), (10, 5, 8), 1));
++        assert_eq!(TICK.as_millis() * HEARTBEAT_TICKS as u128, 3_000);
++    }
++}
+diff --git a/rust-client/vendor/netstack-smoltcp/src/device.rs b/rust-client/vendor/netstack-smoltcp/src/device.rs
+index 077e60c..941cb93 100644
+--- a/rust-client/vendor/netstack-smoltcp/src/device.rs
++++ b/rust-client/vendor/netstack-smoltcp/src/device.rs
+@@ -38,6 +38,14 @@ impl VirtualDevice {
+     }
+ }
+ 
++impl VirtualDevice {
++    /// A frame is still queued for smoltcp: `receive` keeps it while the egress channel is full, so the runner must
++    /// not park on its idle Notify then — nothing notifies it when egress drains.
++    pub(super) fn ingress_pending(&self) -> bool {
++        !self.in_buf.is_empty()
++    }
++}
++
+ impl Device for VirtualDevice {
+     type RxToken<'a> = VirtualRxToken;
+     type TxToken<'a> = VirtualTxToken<'a>;
+@@ -131,4 +139,23 @@ mod tests {
+             .expect("in_buf packet must not have been dropped while out_buf was full");
+         assert_eq!(rx_token.consume(|buf| buf.to_vec()), b"payload");
+     }
++
++    #[test]
++    fn ingress_pending_while_a_kept_frame_waits_for_egress() {
++        // the runner parks on its idle Notify only with nothing queued: a frame `receive` kept because egress was
++        // full must hold it on the timed re-poll, or it waits for the next ingress packet
++        let (out_tx, mut out_rx) = channel::<AnyIpPktFrame>(1);
++        let (mut device, ingress_tx, _in_buf_avail) = VirtualDevice::new(out_tx.clone(), 1500);
++        assert!(!device.ingress_pending());
++        out_tx.try_send(vec![0u8; 4]).unwrap();
++        ingress_tx.try_send(b"payload".to_vec()).unwrap();
++        assert!(device.receive(Instant::from_millis(0)).is_none());
++        assert!(device.ingress_pending());
++        out_rx.try_recv().unwrap();
++        {
++            let (rx_token, _tx_token) = device.receive(Instant::from_millis(1)).unwrap();
++            rx_token.consume(|_| ());
++        }
++        assert!(!device.ingress_pending());
++    }
+ }
+diff --git a/rust-client/vendor/netstack-smoltcp/src/tcp.rs b/rust-client/vendor/netstack-smoltcp/src/tcp.rs
+index 2e3487c..ce23053 100644
+--- a/rust-client/vendor/netstack-smoltcp/src/tcp.rs
++++ b/rust-client/vendor/netstack-smoltcp/src/tcp.rs
+@@ -342,9 +342,17 @@ impl TcpListenerRunner {
+             if iface_ingress_tx_avail.swap(false, Ordering::AcqRel) {
+                 tokio::task::yield_now().await;
+             } else {
+-                let next_duration = iface
+-                    .poll_delay(before_poll, &socket_set)
+-                    .unwrap_or(Duration::from_millis(5));
++                let poll_delay = iface.poll_delay(before_poll, &socket_set);
++                if poll_delay.is_none() && sockets.is_empty() && !device.ingress_pending() {
++                    // No socket and no pending fragment: nothing here runs on a timer. What can change that (an
++                    // ingress packet, the SYN that creates a socket) calls notify_one, and a notify sent while we
++                    // were polling is kept as a permit. The 5 ms re-poll below woke the runtime ~200 times a second
++                    // for the whole life of an idle tunnel (csqtt 2.5.2, measured on a phone). A frame still queued
++                    // (egress was full, `receive` kept it) takes the timed re-poll below instead.
++                    notify.notified().await;
++                    continue;
++                }
++                let next_duration = poll_delay.unwrap_or(Duration::from_millis(5));
+                 if next_duration != Duration::ZERO {
+                     let _ = tokio::time::timeout(
+                         tokio::time::Duration::from(next_duration.min(Duration::from_millis(20))),

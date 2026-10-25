@@ -45,7 +45,7 @@ import (
 	"golang.zx2c4.com/wireguard/tun/netstack"
 )
 
-const version = "1.1"
+const version = "1.0.1"
 
 var (
 	exeDir  string
