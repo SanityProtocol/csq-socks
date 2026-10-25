@@ -48,14 +48,23 @@ def parse(link):
 # csq-socks set -mtu N -dns X -port N -streams N (-X default = back to the default, -reset = all of them)
 DEFAULTS = {"mtu": 1500, "dns": "default", "port": 1089, "streams": 10}
 RANGES = {"mtu": (576, 1500), "port": (1, 65535), "streams": (3, 100)}   # streams: the client clamps -n to 3..100
-DNS_FORMS = "default, an IP (1.1.1.1 or 1.1.1.1,8.8.8.8), tls://IP[:PORT][#NAME] (DoT) or https://URL (DoH)"
+DNS_FORMS = ("default, an IPv4 address (1.1.1.1 or 1.1.1.1,8.8.8.8), tls://IP[:PORT][#NAME] (DoT) or https://URL (DoH)"
+             " — the tunnel carries IPv4 only")
+
+def ip4(s):
+    return str(ipaddress.IPv4Address(s))   # ValueError for IPv6 too
 
 def check_dns(v):
     if v == "default":
         return v
     if v.startswith("https://"):
-        if urlsplit(v).hostname:
-            return v
+        h = urlsplit(v).hostname
+        if h:
+            try:
+                if ipaddress.ip_address(h).version == 4:
+                    return v
+            except ValueError:
+                return v   # a name
     elif v.startswith("tls://"):
         addr = v[len("tls://"):].partition("#")[0]
         host, port = addr, "853"
@@ -65,14 +74,14 @@ def check_dns(v):
         elif addr.count(":") == 1:
             host, port = addr.split(":")
         try:
-            ipaddress.ip_address(host)
+            ip4(host)
             if port.isdigit() and 0 < int(port) < 65536:
                 return v
         except ValueError:
             pass
     else:
         try:
-            return ",".join(str(ipaddress.ip_address(a.strip())) for a in v.split(","))
+            return ",".join(ip4(a.strip()) for a in v.split(","))
         except ValueError:
             pass
     sys.exit("-dns takes " + DNS_FORMS)

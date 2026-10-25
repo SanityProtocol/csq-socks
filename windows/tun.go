@@ -21,7 +21,9 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sys/windows"
@@ -83,11 +85,35 @@ func physicalNet() (physical, error) {
 	return physical{}, fmt.Errorf("the default route's interface %s has no IPv4 address", iface.Alias())
 }
 
-// installClient: the client runs from %ProgramFiles%\csq-socks, which only admins can write — the kill switch lets
-// that exe through, so it must not be one anybody can replace (on Linux: /usr/local/lib/csq-socks)
+// programDir: %ProgramFiles%\csq-socks, which only admins can write — by the known folder, not the environment
+// variable a user can set
+func programDir() string {
+	pf, err := windows.KnownFolderPath(windows.FOLDERID_ProgramFiles, 0)
+	if err != nil {
+		pf = `C:\Program Files`
+	}
+	return filepath.Join(pf, "csq-socks")
+}
+
+// the kill switch is on while this file exists: written once the filters are in, removed with them. Under
+// programDir, so only an admin can make it lie.
+func killSwitchMarker() string { return filepath.Join(programDir(), "killswitch.on") }
+
+func killSwitchOn() bool {
+	_, err := os.Stat(killSwitchMarker())
+	return err == nil
+}
+
+func liftKillSwitch() {
+	firewall.Disable()
+	os.Remove(killSwitchMarker())
+}
+
+// installClient: the client runs from programDir — the kill switch lets that exe through (when elevated), so it must
+// not be one anybody can replace (on Linux: /usr/local/lib/csq-socks)
 func installClient(name string) (string, error) {
 	src := filepath.Join(exeDir, name)
-	dir := filepath.Join(os.Getenv("ProgramFiles"), "csq-socks")
+	dir := programDir()
 	dst := filepath.Join(dir, name)
 	want, err := os.ReadFile(src)
 	if err != nil {
@@ -106,15 +132,19 @@ func installClient(name string) (string, error) {
 	return dst, os.Rename(tmp, dst)
 }
 
+// tunRun: from the first tunnel IP on. restart starts the client again bound to another physical address.
 func tunRun(st *state, fail func(string) error, cl *clientRun, clientPath string, cport int, tip netip.Addr,
-	serverDNS []string, o settings, ph physical) error {
+	serverDNS []string, o settings, ph physical, restart func(netip.Addr) (*clientRun, error)) error {
+	keep := killSwitchOn() // an earlier tun's: a tun that fails leaves it on, as it found it
 	mtu := envInt("MTU", o.MTU)
 	dev, err := tun.CreateTUN(adapter, mtu)
 	if err != nil {
 		return fail("the tunnel adapter (wintun.dll next to csq-socks.exe?): " + err.Error())
 	}
 	cleanup := func(why string) error {
-		firewall.Disable()
+		if !keep {
+			liftKillSwitch()
+		}
 		dev.Close()
 		return fail(why)
 	}
@@ -132,13 +162,15 @@ func tunRun(st *state, fail func(string) error, cl *clientRun, clientPath string
 		}
 	}
 
-	// the pump first: the DoH host lookup below already goes through the tunnel
-	uc, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: cport})
+	// the pump: one socket; the client's port can change when the client restarts on another network
+	uc, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
-		return cleanup("client port: " + err.Error())
+		return cleanup("pump socket: " + err.Error())
 	}
 	uc.SetReadBuffer(4 << 20)
 	uc.SetWriteBuffer(4 << 20)
+	var dst atomic.Pointer[net.UDPAddr]
+	dst.Store(&net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: cport})
 	go func() { // adapter → client
 		bufs, sizes := [][]byte{make([]byte, 65535)}, []int{0}
 		for {
@@ -150,14 +182,14 @@ func tunRun(st *state, fail func(string) error, cl *clientRun, clientPath string
 				continue
 			}
 			for i := 0; i < n; i++ {
-				uc.Write(bufs[i][:sizes[i]])
+				uc.WriteToUDP(bufs[i][:sizes[i]], dst.Load())
 			}
 		}
 	}()
 	go func() { // client → adapter
 		buf := make([]byte, 65535)
 		for {
-			n, err := uc.Read(buf)
+			n, _, err := uc.ReadFromUDP(buf)
 			if err != nil {
 				time.Sleep(50 * time.Millisecond) // ICMP port unreachable before the client listens
 				continue
@@ -166,32 +198,63 @@ func tunRun(st *state, fail func(string) error, cl *clientRun, clientPath string
 		}
 	}()
 
+	// the kill switch next, before any of our own traffic: an earlier tun's filters still in place only let its
+	// adapter through, not this one. A DoH URL's host is looked up at the server's DNS: that server is allowed
+	// until it is, then the filters are put in again without it.
 	spec := env("DNS", o.DNS)
-	var allowDNS []netip.Addr
+	if v, err := checkDNS(spec); err == nil {
+		spec = v
+	}
+	loop := netip.MustParseAddr("127.0.0.1")
+	var allowDNS, adapterDNS []netip.Addr
+	var dohHost string
 	switch {
 	case spec == "default": // the system's DNS, now through the tunnel (or the LAN)
 	case strings.HasPrefix(spec, "tls://") || strings.HasPrefix(spec, "https://"):
-		// the forwarder's own connection goes out like any program's: through the tunnel. A DoH URL's host is
-		// looked up once here, at the server's DNS, before the kill switch — then only the forwarder is a DNS server
-		dialTCP := (&net.Dialer{Timeout: 10 * time.Second}).DialContext
+		allowDNS, adapterDNS = []netip.Addr{loop}, []netip.Addr{loop}
 		if u, err := url.Parse(spec); err == nil && strings.HasPrefix(spec, "https://") {
 			if _, err := netip.ParseAddr(u.Hostname()); err != nil {
-				bootstrap := strings.TrimSpace(serverDNS[0])
-				res := &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
-					return (&net.Dialer{}).DialContext(ctx, network, net.JoinHostPort(bootstrap, "53"))
-				}}
-				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-				ips, err := res.LookupNetIP(ctx, "ip4", u.Hostname())
-				cancel()
-				if err != nil || len(ips) == 0 {
-					return cleanup(fmt.Sprintf("could not look up %s at %s: %v", u.Hostname(), bootstrap, err))
-				}
-				pin := ips[0].String()
-				dial := dialTCP
-				dialTCP = func(ctx context.Context, network, addr string) (net.Conn, error) {
-					_, port, _ := net.SplitHostPort(addr)
-					return dial(ctx, network, net.JoinHostPort(pin, port))
-				}
+				dohHost = u.Hostname()
+			}
+		}
+	default:
+		for _, d := range strings.Split(spec, ",") {
+			if a, err := netip.ParseAddr(strings.TrimSpace(d)); err == nil {
+				allowDNS = append(allowDNS, a)
+			}
+		}
+		adapterDNS = allowDNS
+	}
+	bootstrap, _ := netip.ParseAddr(strings.TrimSpace(serverDNS[0]))
+	setup := allowDNS
+	if dohHost != "" && bootstrap.IsValid() {
+		setup = append(append([]netip.Addr{}, allowDNS...), bootstrap)
+	}
+	if err := firewall.Enable(uint64(luid), clientPath, setup); err != nil {
+		return cleanup("kill switch: " + err.Error())
+	}
+	os.WriteFile(killSwitchMarker(), []byte(time.Now().Format(time.RFC3339)+"\n"), 0o644)
+
+	if allowDNS != nil && adapterDNS[0] == loop {
+		// the forwarder's own connection goes out like any program's: through the tunnel
+		dialTCP := (&net.Dialer{Timeout: 10 * time.Second}).DialContext
+		if dohHost != "" {
+			res := &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, network, netip.AddrPortFrom(bootstrap, 53).String())
+			}}
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			ips, err := res.LookupNetIP(ctx, "ip4", dohHost)
+			cancel()
+			if err != nil || len(ips) == 0 {
+				return cleanup(fmt.Sprintf("could not look up %s at %s: %v", dohHost, bootstrap, err))
+			}
+			pin, dial := ips[0].String(), dialTCP
+			dialTCP = func(ctx context.Context, network, addr string) (net.Conn, error) {
+				_, port, _ := net.SplitHostPort(addr)
+				return dial(ctx, network, net.JoinHostPort(pin, port))
+			}
+			if err := firewall.Enable(uint64(luid), clientPath, allowDNS); err != nil { // the server's DNS out again
+				return cleanup("kill switch: " + err.Error())
 			}
 		}
 		pc, err := net.ListenPacket("udp", "127.0.0.1:53")
@@ -201,33 +264,55 @@ func tunRun(st *state, fail func(string) error, cl *clientRun, clientPath string
 		r := newResolver(spec, dialTCP)
 		go r.serveDNS(pc)
 		go r.warm()
-		loop := netip.MustParseAddr("127.0.0.1")
-		if err := luid.SetDNS(windows.AF_INET, []netip.Addr{loop}, nil); err != nil {
-			return cleanup("adapter DNS: " + err.Error())
-		}
-		allowDNS = []netip.Addr{loop}
-	default:
-		for _, d := range strings.Split(spec, ",") {
-			if a, err := netip.ParseAddr(d); err == nil {
-				allowDNS = append(allowDNS, a)
-			}
-		}
-		if err := luid.SetDNS(windows.AF_INET, allowDNS, nil); err != nil {
-			return cleanup("adapter DNS: " + err.Error())
-		}
 	}
-	if err := firewall.Enable(uint64(luid), clientPath, allowDNS); err != nil {
-		return cleanup("kill switch: " + err.Error())
+	if adapterDNS != nil {
+		if err := luid.SetDNS(windows.AF_INET, adapterDNS, nil); err != nil {
+			return cleanup("adapter DNS: " + err.Error())
+		}
 	}
 
-	st.Phase, st.TIP, st.DNS = "up", tip.String(), []string{spec}
+	st.Phase, st.TIP, st.DNS, st.Detail = "up", tip.String(), []string{spec}, ""
 	st.Phys = ph.alias + " " + ph.ip.String()
 	writeState(*st)
-	<-cl.exited
-	// the adapter stays and the filters stay: traffic is blocked, not leaked, until csq-socks down
-	st.Phase, st.Detail = "blocked", "the client exited — traffic is blocked until csq-socks down"
-	writeState(*st)
-	select {}
+
+	// the client's sockets are bound to the physical address: when that changes (another Wi-Fi, a new lease, a
+	// cable) the client is started again on the new one. The filters stay all along: blocked meanwhile, not leaked.
+	blocked := func(why string) {
+		st.Phase, st.Detail = "blocked", why+" — traffic is blocked until csq-socks down"
+		writeState(*st)
+	}
+	for tick := time.NewTicker(5 * time.Second); ; {
+		select {
+		case f := <-cl.found: // a client started again is through
+			port, _ := strconv.Atoi(f[0])
+			dst.Store(&net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port})
+			if t, err := netip.ParseAddr(f[1]); err == nil && t != tip {
+				tip = t
+				luid.SetIPAddresses([]netip.Prefix{netip.PrefixFrom(tip, 32)})
+			}
+			st.Phase, st.TIP, st.Detail = "up", tip.String(), ""
+			writeState(*st)
+		case <-cl.exited:
+			blocked("the client exited")
+			cl.exited = nil // a nil channel: from here on, only a network change starts it again
+		case <-tick.C:
+			p, err := physicalNet()
+			if err != nil || p.ip == ph.ip {
+				continue
+			}
+			ph = p
+			st.Phase, st.Phys, st.Detail = "reconnecting", p.alias+" "+p.ip.String(), "the network changed"
+			writeState(*st)
+			if cl.exited != nil {
+				cl.proc.Kill()
+				<-cl.exited
+			}
+			if cl, err = restart(p.ip); err != nil {
+				blocked("could not start the client again: " + err.Error())
+				cl = &clientRun{}
+			}
+		}
+	}
 }
 
 // exitIPDirect: the exit as any program sees it (tun routes everything)
@@ -241,10 +326,4 @@ func exitIPDirect() string {
 	defer r.Body.Close()
 	b, _ := io.ReadAll(io.LimitReader(r.Body, 256))
 	return string(bytes.TrimSpace(b))
-}
-
-// tunDNSCheck: what tun can do with the DNS setting — everything up can
-func tunDNSCheck(spec string) error {
-	_, err := checkDNS(spec)
-	return err
 }

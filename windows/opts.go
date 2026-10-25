@@ -23,7 +23,7 @@ type settings struct {
 	Streams int    `json:"streams,omitempty"`
 }
 
-const dnsForms = "default, an IP (1.1.1.1 or 1.1.1.1,8.8.8.8), tls://IP[:PORT][#NAME] (DoT) or https://URL (DoH)"
+const dnsForms = "default, an IPv4 address (1.1.1.1 or 1.1.1.1,8.8.8.8), tls://IP[:PORT][#NAME] (DoT) or https://URL (DoH) — the tunnel carries IPv4 only"
 
 func loadOpts() settings {
 	var o settings
@@ -70,7 +70,7 @@ func dotAddr(v string) (addr, name string, ok bool) {
 	}
 	ip, err := netip.ParseAddr(host)
 	n, perr := strconv.Atoi(port)
-	if err != nil || perr != nil || n < 1 || n > 65535 {
+	if err != nil || !ip.Is4() || perr != nil || n < 1 || n > 65535 {
 		return "", "", false
 	}
 	if name == "" {
@@ -85,7 +85,9 @@ func checkDNS(v string) (string, error) {
 		return v, nil
 	case strings.HasPrefix(v, "https://"):
 		if u, err := url.Parse(v); err == nil && u.Hostname() != "" {
-			return v, nil
+			if ip, err := netip.ParseAddr(u.Hostname()); err != nil || ip.Is4() {
+				return v, nil
+			}
 		}
 	case strings.HasPrefix(v, "tls://"):
 		if _, _, ok := dotAddr(v); ok {
@@ -95,7 +97,7 @@ func checkDNS(v string) (string, error) {
 		var ips []string
 		for _, a := range strings.Split(v, ",") {
 			ip, err := netip.ParseAddr(strings.TrimSpace(a))
-			if err != nil {
+			if err != nil || !ip.Is4() {
 				return "", fmt.Errorf("-dns takes %s", dnsForms)
 			}
 			ips = append(ips, ip.String())

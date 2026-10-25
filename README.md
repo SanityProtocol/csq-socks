@@ -88,7 +88,11 @@ settings as on Linux:
   `C:\Program Files\csq-socks` and only its own VK traffic goes out directly. The kill switch blocks everything else
   (your local network stays reachable) if the tunnel drops, even if csq-socks itself is closed, until
   `csq-socks down` — or a restart. In `tun` every `-dns` form works, DoT and DoH included.
-- After moving to another network (Wi-Fi to cable, a new address): `csq-socks down`, then `csq-socks tun` again.
+- Another network (Wi-Fi to cable, a new address): `tun` follows it on its own — traffic stays blocked for the few
+  seconds it reconnects.
+- Only an elevated client gets past the kill switch: a program that starts the client exe unelevated gets nothing.
+- Not covered: traffic Windows forwards for others (WSL2, Hyper-V's Default Switch, Internet Connection Sharing)
+  while csq-socks itself is not running — it is not this machine's own traffic, which the kill switch filters.
 - `tun` uses Wintun (`wintun.dll`, unmodified, under its own licence: `LICENSE-wintun.txt`).
 
 ## Licence
@@ -115,7 +119,7 @@ curl -fsSL https://github.com/SanityProtocol/csq-socks/releases/latest/download/
 Windows: скачайте `csq-socks-windows.zip` из Releases, распакуйте в любую папку и запускайте `.\csq-socks …` из
 терминала в ней — команды те же. `up` работает без прав администратора; `tun` и `down` после него — из терминала
 администратора. При обрыве туннеля в режиме `tun` трафик блокируется (локальная сеть доступна) до `csq-socks down`
-или перезагрузки — даже если сам csq-socks закрыт. После смены сети: `csq-socks down`, затем `csq-socks tun`.
+или перезагрузки — даже если сам csq-socks закрыт. При смене сети `tun` переподключается сам.
 
 ```bash
 csq-socks set      # вставить ссылку csqtt:// и нажать Enter

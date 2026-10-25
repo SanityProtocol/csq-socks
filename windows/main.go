@@ -46,8 +46,6 @@ import (
 
 	"golang.org/x/sys/windows"
 	"golang.zx2c4.com/wireguard/tun/netstack"
-
-	"csq-socks/firewall"
 )
 
 const version = "1.0.1"
@@ -95,7 +93,7 @@ func main() {
 	case "status":
 		status()
 	case "down":
-		if s, ok := readState(); ok && s.Mode == "tun" && !elevated() {
+		if s, ok := readState(); (killSwitchOn() || ok && s.Mode == "tun") && !elevated() {
 			err = fmt.Errorf("after tun, csq-socks down needs an admin terminal (it lifts the kill switch)")
 			break
 		}
@@ -206,8 +204,9 @@ func alive(pid int) bool {
 	if windows.QueryFullProcessImageName(h, 0, &buf[0], &n) != nil {
 		return false
 	}
+	// by the exe's name, not its path: a second copy of csq-socks.exe must still see this one
 	self, _ := os.Executable()
-	return strings.EqualFold(windows.UTF16ToString(buf[:n]), self)
+	return strings.EqualFold(filepath.Base(windows.UTF16ToString(buf[:n])), filepath.Base(self))
 }
 
 func up(mode string) error {
@@ -219,16 +218,23 @@ func up(mode string) error {
 		return fmt.Errorf("already up (%s) — csq-socks down first", s.Mode)
 	}
 	port := envInt("PORT", loadOpts().eff().Port)
-	if mode == "tun" {
-		if err := tunDNSCheck(env("DNS", loadOpts().eff().DNS)); err != nil {
-			return err
-		}
-	} else if l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port)); err != nil {
-		return fmt.Errorf("port %d is in use — pick another: csq-socks up PORT", port)
-	} else {
-		l.Close()
+	if _, err := checkDNS(env("DNS", loadOpts().eff().DNS)); err != nil {
+		return err
 	}
-	down()
+	// an earlier tun's kill switch, still blocking: tun takes it over (it stays on while tun connects again), and a
+	// tun that fails leaves it on; up cannot run under it
+	ks := killSwitchOn()
+	if ks && mode != "tun" {
+		return fmt.Errorf("the kill switch of an earlier csq-socks tun is still on and blocks traffic — run csq-socks down from an admin terminal first")
+	}
+	if mode != "tun" {
+		if l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port)); err != nil {
+			return fmt.Errorf("port %d is in use — pick another: csq-socks up PORT", port)
+		} else {
+			l.Close()
+		}
+	}
+	stopDaemon()
 	os.MkdirAll(run, 0o700)
 	os.WriteFile(logPath, nil, 0o600)
 	self, _ := os.Executable()
@@ -266,14 +272,22 @@ func up(mode string) error {
 		if (ok && s.Pid == pid && s.Phase == "failed") || !alive(pid) {
 			fmt.Printf("%s — client log tail:\n", firstNonEmpty(s.Detail, "the connection stopped"))
 			logTail(20)
-			down()
+			giveUp(mode, ks)
 			return fmt.Errorf("not connected")
 		}
 	}
 	fmt.Printf("no tunnel after %ds — client log tail:\n", wait)
 	logTail(20)
-	down()
+	giveUp(mode, ks)
 	return fmt.Errorf("not connected")
+}
+
+// giveUp: a tun that did not connect leaves the kill switch as it found it — on if an earlier tun left it on
+func giveUp(mode string, ks bool) {
+	stopDaemon()
+	if mode == "tun" && !ks {
+		liftKillSwitch()
+	}
 }
 
 func firstNonEmpty(a, b string) string {
@@ -296,6 +310,9 @@ func status() {
 		if s.Phase == "up" {
 			fmt.Printf("exit IP: %s\n", exitIPDirect())
 		}
+	} else if killSwitchOn() {
+		fmt.Println("client: not running")
+		fmt.Println("kill switch: ON — traffic is blocked until csq-socks down (admin terminal)")
 	} else if !ok || !alive(s.Pid) {
 		fmt.Println("client: not running")
 		fmt.Println("socks: not running")
@@ -347,16 +364,21 @@ func logTail(n int) {
 	}
 }
 
+// down: the connection, and as admin the kill switch — also one a tun that crashed left
 func down() {
+	stopDaemon()
+	if elevated() {
+		liftKillSwitch()
+	}
+}
+
+func stopDaemon() {
 	if s, ok := readState(); ok && alive(s.Pid) {
 		if h, err := windows.OpenProcess(windows.PROCESS_TERMINATE|windows.SYNCHRONIZE, false, uint32(s.Pid)); err == nil {
 			windows.TerminateProcess(h, 0) // the job object takes the client with it, the adapter goes with us
 			windows.WaitForSingleObject(h, 5000)
 			windows.CloseHandle(h)
 		}
-	}
-	if elevated() {
-		firewall.Disable() // also what a tun that crashed left
 	}
 	os.Remove(filepath.Join(run, "state.json"))
 }
@@ -405,6 +427,13 @@ func daemon(args []string) error {
 	cargs = append(cargs, "-n", env("N", strconv.Itoa(o.Streams)), "--listen", "127.0.0.1:0")
 	clientPath := filepath.Join(exeDir, client)
 	var ph physical
+	start := func(bind netip.Addr) (*clientRun, error) {
+		a := cargs
+		if bind.IsValid() { // tun: its own traffic leaves by the physical network
+			a = append(append([]string{}, cargs...), "--bind-ip", bind.String())
+		}
+		return startClient(clientPath, a, c.Password)
+	}
 	if mode == "tun" {
 		if ph, err = physicalNet(); err != nil {
 			return fail(err.Error())
@@ -412,9 +441,8 @@ func daemon(args []string) error {
 		if clientPath, err = installClient(client); err != nil {
 			return fail(err.Error())
 		}
-		cargs = append(cargs, "--bind-ip", ph.ip.String()) // its own traffic leaves by the physical network
 	}
-	cl, err := startClient(clientPath, cargs, c.Password)
+	cl, err := start(ph.ip)
 	if err != nil {
 		return fail(err.Error())
 	}
@@ -430,10 +458,13 @@ func daemon(args []string) error {
 	}
 	cport, _ := strconv.Atoi(f[0])
 	if mode == "tun" {
-		return tunRun(&st, fail, cl, clientPath, cport, tip, strings.Split(firstNonEmpty(f[2], "1.1.1.1"), ","), o, ph)
+		return tunRun(&st, fail, cl, clientPath, cport, tip, strings.Split(firstNonEmpty(f[2], "1.1.1.1"), ","), o, ph, start)
 	}
 	// DoT/DoH: the proxy asks that server; the stack keeps the server's DNS, for a DoH URL's own host
 	spec, rdns := env("DNS", o.DNS), ""
+	if v, err := checkDNS(spec); err == nil {
+		spec = v
+	}
 	dnsList := strings.Split(firstNonEmpty(f[2], "1.1.1.1"), ",")
 	switch {
 	case spec == "default":
@@ -513,6 +544,7 @@ func daemon(args []string) error {
 type clientRun struct {
 	found  chan [3]string // client port, tunnel IP, DNS
 	exited chan struct{}
+	proc   *os.Process
 }
 
 // startClient: the client in the job (it goes when this process goes), its output into the log, watched for the
@@ -538,7 +570,7 @@ func startClient(path string, args []string, password string) (*clientRun, error
 		windows.AssignProcessToJobObject(job, h)
 		windows.CloseHandle(h)
 	}
-	cl := &clientRun{found: make(chan [3]string, 1), exited: make(chan struct{})}
+	cl := &clientRun{found: make(chan [3]string, 1), exited: make(chan struct{}), proc: cmd.Process}
 	go func() {
 		err := cmd.Wait()
 		fmt.Fprintf(pw, "client exited %v\n", err)

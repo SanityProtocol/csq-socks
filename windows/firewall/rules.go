@@ -126,30 +126,41 @@ func permitTunInterface(session uintptr, baseObjects *baseObjects, weight uint8,
 	return nil
 }
 
-// permitApp: everything the program at path sends or receives, on any interface — the csqtt client's own VK/TURN traffic
-// (csq-socks: by the exe path alone; WireGuard also matched its service SID, which a plain process has none of)
+// permitApp: everything the program at path sends or receives, on any interface — the csqtt client's own VK/TURN traffic.
+// csq-socks: the exe path, and a token with Administrators enabled (the elevated csq-socks that starts it): a program
+// that runs the same exe unelevated gets nothing past the kill switch (WireGuard matched its service SID instead).
 func permitApp(session uintptr, baseObjects *baseObjects, weight uint8, path string) error {
 	appID, err := getAppID(path)
 	if err != nil {
 		return wrapErr(err)
 	}
 	defer fwpmFreeMemory0(unsafe.Pointer(&appID))
+	if err := setAdminBlob(); err != nil {
+		return wrapErr(err)
+	}
 
-	condition := wtFwpmFilterCondition0{
+	conditions := [2]wtFwpmFilterCondition0{{
 		fieldKey:  cFWPM_CONDITION_ALE_APP_ID,
 		matchType: cFWP_MATCH_EQUAL,
 		conditionValue: wtFwpConditionValue0{
 			_type: cFWP_BYTE_BLOB_TYPE,
-			value: uintptr(unsafe.Pointer(appID)),
+			value: uintptr(unsafe.Pointer(appID)), // WFP's own memory
 		},
-	}
+	}, {
+		fieldKey:  cFWPM_CONDITION_ALE_USER_ID,
+		matchType: cFWP_MATCH_EQUAL,
+		conditionValue: wtFwpConditionValue0{
+			_type: cFWP_SECURITY_DESCRIPTOR_TYPE,
+			value: uintptr(unsafe.Pointer(&adminBlob)), // a package variable: it never moves
+		},
+	}}
 	filter := wtFwpmFilter0{
 		providerKey:         &baseObjects.provider,
 		subLayerKey:         baseObjects.filters,
 		weight:              filterWeight(weight),
 		flags:               cFWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT,
-		numFilterConditions: 1,
-		filterCondition:     &condition,
+		numFilterConditions: uint32(len(conditions)),
+		filterCondition:     &conditions[0],
 		action: wtFwpmAction0{
 			_type: cFWP_ACTION_PERMIT,
 		},
@@ -179,8 +190,9 @@ func permitApp(session uintptr, baseObjects *baseObjects, weight uint8, path str
 
 // permitLAN: the local network stays reachable while the tunnel is up or blocked (csq-socks; on Linux its routes stay):
 // RFC 1918, link-local, multicast and broadcast; on IPv6 link-local
-func permitLAN(session uintptr, baseObjects *baseObjects, weight uint8) error {
-	v4 := []wtFwpV4AddrAndMask{
+// package variables: the conditions carry their addresses as uintptr, which a moving goroutine stack would leave stale
+var (
+	lanV4 = [...]wtFwpV4AddrAndMask{
 		{0x0A000000, 0xFF000000}, // 10.0.0.0/8
 		{0xAC100000, 0xFFF00000}, // 172.16.0.0/12
 		{0xC0A80000, 0xFFFF0000}, // 192.168.0.0/16
@@ -188,6 +200,11 @@ func permitLAN(session uintptr, baseObjects *baseObjects, weight uint8) error {
 		{0xE0000000, 0xF0000000}, // 224.0.0.0/4
 		{0xFFFFFFFF, 0xFFFFFFFF}, // 255.255.255.255
 	}
+	lanV6 = linkLocal
+)
+
+func permitLAN(session uintptr, baseObjects *baseObjects, weight uint8) error {
+	v4 := lanV4[:]
 	conditions := make([]wtFwpmFilterCondition0, len(v4)) // the same field repeated = any of them
 	for i := range v4 {
 		conditions[i] = wtFwpmFilterCondition0{
@@ -199,13 +216,12 @@ func permitLAN(session uintptr, baseObjects *baseObjects, weight uint8) error {
 			},
 		}
 	}
-	v6 := linkLocal
 	condition6 := wtFwpmFilterCondition0{
 		fieldKey:  cFWPM_CONDITION_IP_REMOTE_ADDRESS,
 		matchType: cFWP_MATCH_EQUAL,
 		conditionValue: wtFwpConditionValue0{
 			_type: cFWP_V6_ADDR_MASK,
-			value: uintptr(unsafe.Pointer(&v6)),
+			value: uintptr(unsafe.Pointer(&lanV6)),
 		},
 	}
 	filterID := uint64(0)
@@ -238,7 +254,6 @@ func permitLAN(session uintptr, baseObjects *baseObjects, weight uint8) error {
 		if err := fwpmFilterAdd0(session, &filter, 0, &filterID); err != nil {
 			return wrapErr(err)
 		}
-		runtime.KeepAlive(v4)
 	}
 	return nil
 }

@@ -85,3 +85,46 @@ func getAppID(path string) (*wtFwpByteBlob, error) {
 	}
 	return appID, nil
 }
+
+// adminBlob: a security descriptor that lets a token match only while BUILTIN\Administrators is enabled in it — an
+// elevated process. An unelevated one holds that group deny-only, which grants nothing. Package variables, so the
+// uintptr a filter condition holds stays valid.
+var (
+	adminSD   *windows.SECURITY_DESCRIPTOR
+	adminBlob wtFwpByteBlob
+)
+
+func setAdminBlob() error {
+	if adminSD != nil {
+		return nil
+	}
+	sid, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		return wrapErr(err)
+	}
+	dacl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{{
+		AccessPermissions: cFWP_ACTRL_MATCH_FILTER,
+		AccessMode:        windows.GRANT_ACCESS,
+		Trustee: windows.TRUSTEE{
+			TrusteeForm:  windows.TRUSTEE_IS_SID,
+			TrusteeType:  windows.TRUSTEE_IS_GROUP,
+			TrusteeValue: windows.TrusteeValueFromSID(sid),
+		},
+	}}, nil)
+	if err != nil {
+		return wrapErr(err)
+	}
+	sd, err := windows.NewSecurityDescriptor()
+	if err != nil {
+		return wrapErr(err)
+	}
+	if err := sd.SetDACL(dacl, true, false); err != nil {
+		return wrapErr(err)
+	}
+	if sd, err = sd.ToSelfRelative(); err != nil {
+		return wrapErr(err)
+	}
+	adminSD = sd
+	adminBlob = wtFwpByteBlob{sd.Length(), (*byte)(unsafe.Pointer(sd))}
+	return nil
+}

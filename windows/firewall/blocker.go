@@ -93,17 +93,19 @@ func registerBaseObjects(session uintptr) (*baseObjects, error) {
 	return bo, nil
 }
 
-// Enable blocks everything but the tunnel interface (luid), the program clientExe, loopback, DHCP, NDP and the LAN.
+// Enable blocks everything but the tunnel interface (luid), the program clientExe, loopback, DHCP, NDP and the LAN,
+// replacing in one transaction what an earlier Enable left.
 // dnsServers, when given, are the only DNS servers anything but clientExe may reach, LAN ones included.
 func Enable(luid uint64, clientExe string, dnsServers []netip.Addr) error {
-	Disable()
 	session, err := openSession()
 	if err != nil {
 		return err
 	}
 	defer fwpmEngineClose0(session)
 	nextFilter = 0
+	// what an earlier run left goes in the same transaction the new filters come in: never a moment without either
 	return runTransaction(session, func(session uintptr) error {
+		removeAll(session)
 		bo, err := registerBaseObjects(session)
 		if err != nil {
 			return err
@@ -140,11 +142,15 @@ func Disable() error {
 		return err
 	}
 	defer fwpmEngineClose0(session)
+	removeAll(session)
+	return nil
+}
+
+func removeAll(session uintptr) {
 	for i := 0; i < maxFilters; i++ {
 		k := filterKey(i)
 		fwpmDeleteByKey(procFwpmFilterDeleteByKey0, session, &k)
 	}
 	fwpmDeleteByKey(procFwpmSubLayerDeleteByKey0, session, &sublayerKey)
 	fwpmDeleteByKey(procFwpmProviderDeleteByKey0, session, &providerKey)
-	return nil
 }
