@@ -40,6 +40,23 @@ csq-socks down     # disconnect, everything back to normal
 runs as system user `csqs`, and only its own VK traffic goes out directly. If the tunnel drops, traffic is **blocked**,
 not leaked, until `csq-socks down`. Turn other VPNs off first: while `tun` is up it takes priority over them.
 
+## Settings
+
+```bash
+csq-socks set -mtu 1400 -dns tls://9.9.9.9#dns.quad9.net   # with a link saved, only the settings change
+csq-socks set -dns default                                  # one setting back to its default
+csq-socks set -reset                                        # all of them
+```
+
+| setting | default | |
+|---|---|---|
+| `-mtu` | 1500 | 576–1500: the tunnel's packet size. Lower it if pages stall while small requests work. |
+| `-dns` | `default` | `up`: the server's DNS; `tun`: your system's DNS, through the tunnel. Or an IP (`1.1.1.1`, `1.1.1.1,8.8.8.8`), DoT `tls://IP[#name]`, or DoH `https://…` (`up` only). In `tun`, a DNS setting needs systemd-resolved (Ubuntu, most desktops). |
+| `-port` | 1089 | the proxy's port (`csq-socks up 1095` still picks one for a single run) |
+| `-streams` | 10 | 3–100 parallel csqtt streams |
+
+The settings stay in `~/.config/csq-socks/settings.json`; a new link keeps them. `csq-socks status` shows them.
+
 ## Good to know
 
 - **The link picks the client.** A readable `csqtt://connect?…` link is a 2.1 server; a long scrambled `csqtt://…`
@@ -84,6 +101,9 @@ csq-socks down     # отключиться
   (в Firefox — SOCKS v5 и «Отправлять DNS-запросы через прокси»).
 - В режиме `tun` весь трафик и DNS идут через csqtt; при обрыве туннеля трафик **блокируется** до `csq-socks down`.
   Другие VPN на это время выключите.
+- Настройки: `csq-socks set -mtu 1400 -dns tls://9.9.9.9#dns.quad9.net` (ссылка уже сохранена — меняются только
+  настройки), `-port`, `-streams`; `-X default` возвращает одну, `-reset` — все. DNS: IP, DoT `tls://IP[#имя]`
+  или DoH `https://…` (только `up`); в режиме `tun` DNS-настройка требует systemd-resolved. Показывает `csq-socks status`.
 - Ссылка 2.1 привязана к одному устройству: если она уже используется в другом приложении, попросите отдельную.
 - Зависло на «connecting…», а в `csq-socks status` — «Flood control»: VK ограничил ваш IP. Закройте другие клиенты
   csqtt, подождите несколько минут и повторите; не прерывайте `up` через Ctrl-C.

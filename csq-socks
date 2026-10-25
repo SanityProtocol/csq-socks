@@ -4,6 +4,10 @@
 # netns "csqs", and a small SOCKS5 server inside that netns listens on a socket opened in the host namespace — so only
 # what you point at the proxy uses the tunnel; the machine's own routing is untouched.
 #   csq-socks set          — paste a csqtt:// link (2.1 plain or 2.5 sealed); saved to ~/.config/csq-socks/conn.json (0600)
+#   csq-socks set -mtu N -dns X -port N -streams N
+#                          — settings, kept in settings.json beside it (a new link keeps them); with a link saved, no paste.
+#                            -dns: default (up: the server's DNS; tun: the system's, through the tunnel), an IP or
+#                            IP,IP, tls://IP[:PORT][#NAME] (DoT), https://URL (DoH, up only). -X default, or -reset for all.
 #   csq-socks up [PORT]    — connect (sudo); then use socks5h://127.0.0.1:PORT
 #   csq-socks tun          — connect as a full tunnel instead (sudo): ALL traffic goes through csqtt, no proxy to set.
 #                            The client runs as system user csqs, whose own traffic (VK, TURN) alone goes out directly;
@@ -11,21 +15,30 @@
 #                            traffic is blocked (kill switch) until csq-socks down.
 #   csq-socks status       — client state, tunnel address, exit IP through the proxy, log tail
 #   csq-socks down         — disconnect and remove the netns (sudo)
-# env: PORT (1089), N client streams (10), WAIT seconds to wait for the tunnel (240; VK pauses 30–60 s on a flood), DEVID device id a 2.1 server binds the password to (csq-socks), DNS (from the
-#      server, else 1.1.1.1). 2.1 and 2.5 do not talk to each other: the link's form picks the client.
+# env (one run, over the settings): PORT (1089), N client streams (10), MTU (1500), DNS (as -dns), WAIT seconds to wait
+#      for the tunnel (240; VK pauses 30–60 s on a flood), DEVID device id a 2.1 server binds the password to (csq-socks).
+#      2.1 and 2.5 do not talk to each other: the link's form picks the client.
 set -u
 D=$(cd "$(dirname "$(readlink -f "$0")")" && pwd); NS=csqs; TUN=csqstun; UDS=csqs-uds; RUN=/run/csq-socks
 U=${SUDO_UID:-$(id -u)}; G=${SUDO_GID:-$(id -g)}; UH=$(getent passwd "$U" | cut -d: -f6)
-CFG=$UH/.config/csq-socks/conn.json; LOG=$RUN/client.log; TABLE=51821; CUSER=csqs; LIB=/usr/local/lib/csq-socks
+CFG=$UH/.config/csq-socks/conn.json; OPT=$UH/.config/csq-socks/settings.json; LOG=$RUN/client.log; TABLE=51821; CUSER=csqs; LIB=/usr/local/lib/csq-socks
 field(){ python3 -I "$D/link.py" get "$1" < "$CFG"; }
-asroot(){ [ "$(id -u)" = 0 ] || exec sudo PORT="${PORT:-}" WAIT="${WAIT:-}" N="${N:-}" DEVID="${DEVID:-}" DNS="${DNS:-}" "$D/csq-socks" "$@"; }
-port(){ echo "${PORT:-$(cat "$RUN/port" 2>/dev/null || echo 1089)}"; }
+opt(){ cat "$OPT" 2>/dev/null | python3 -I "$D/link.py" opt "$1"; }
+asroot(){ [ "$(id -u)" = 0 ] || exec sudo PORT="${PORT:-}" WAIT="${WAIT:-}" N="${N:-}" DEVID="${DEVID:-}" DNS="${DNS:-}" MTU="${MTU:-}" "$D/csq-socks" "$@"; }
+port(){ echo "${PORT:-$(cat "$RUN/port" 2>/dev/null || opt port)}"; }
 nsx(){ ip netns exec $NS "$@"; }
 alive(){ [ -f "$RUN/$1.pid" ] && [ -d "/proc/$(cat "$RUN/$1.pid")" ]; }   # /proc, not kill -0: status runs unprivileged
 asuser=(setpriv --reuid="$U" --regid="$G" --init-groups)
 
 set_(){
-  local link conn; echo "Paste the csqtt:// link, then Enter:"; IFS= read -r link || return 1
+  local link conn new
+  if [ $# -gt 0 ]; then
+    new=$(cat "$OPT" 2>/dev/null | python3 -I "$D/link.py" opts "$@") || return 1
+    mkdir -p "$(dirname "$OPT")"; (umask 077; printf '%s\n' "$new" > "$OPT")
+    echo "settings: $(opt all)"
+    [ -s "$CFG" ] && return 0
+  fi
+  echo "Paste the csqtt:// link, then Enter:"; IFS= read -r link || return 1
   conn=$(printf '%s' "$link" | python3 -I "$D/link.py" parse) || return 1
   mkdir -p "$(dirname "$CFG")"; (umask 077; printf '%s\n' "$conn" > "$CFG")
   echo "saved: csqtt $(field line) server $(field host):$(field port), $(field hashes | tr ',' '\n' | grep -c .) VK hash(es)"
@@ -35,7 +48,12 @@ up(){   # $1 = socks | tun
   local mode=$1
   [ -s "$CFG" ] || { echo "no connection saved — run: csq-socks set"; return 1; }
   [ -f "$RUN/client.pid" ] && { echo "already up ($(cat "$RUN/mode" 2>/dev/null)) — csq-socks down first"; return 1; }
-  local p; p=$(port)
+  local p dspec mtu; p=${PORT:-$(opt port)} dspec=${DNS:-$(opt dns)} mtu=${MTU:-$(opt mtu)}
+  if [ "$mode" = tun ] && [ "$dspec" != default ]; then
+    case $dspec in https://*) echo "DoH (https://) works with csq-socks up; for tun set an IP or tls://IP: csq-socks set -dns …"; return 1;; esac
+    command -v resolvectl >/dev/null && systemctl is-active -q systemd-resolved \
+      || { echo "a DNS setting in tun mode needs systemd-resolved — or: csq-socks set -dns default"; return 1; }
+  fi
   [ "$mode" = tun ] || ! ss -Hltn "sport = :$p" | grep -q . || { echo "port $p is in use — pick another: csq-socks up PORT"; return 1; }
   local line host pport pw vk client v21=() peer tip dns i bin runas
   line=$(field line) host=$(field host) pport=$(field port) pw=$(field password) vk=$(field hashes)
@@ -56,42 +74,51 @@ up(){   # $1 = socks | tun
   fi
   # the client quits when its parent exits (getppid watch): the wrapper shell stays its parent
   CSQTT_PASSWORD="$pw" HOME="$UH" setsid bash -c '"$@"; echo "client exited $?"' _ "${runas[@]}" "$bin" \
-    --peer "$peer" --vk "$vk" "${v21[@]}" --tun-uds $UDS -n "${N:-10}" --listen 127.0.0.1:0 >> "$LOG" 2>&1 < /dev/null &
+    --peer "$peer" --vk "$vk" "${v21[@]}" --tun-uds $UDS -n "${N:-$(opt streams)}" --listen 127.0.0.1:0 >> "$LOG" 2>&1 < /dev/null &
   echo $! > "$RUN/client.pid"
   echo "connecting to $peer (csqtt $line)…"
   for i in $(seq 1 "${WAIT:-240}"); do
     tip=$(grep -aoE 'Tunnel IP: [0-9.]+' "$LOG" | head -1 | awk '{print $3}'); [ -n "$tip" ] && break
     alive client || break; sleep 1; done
   [ -n "$tip" ] || { echo "no tunnel after ${i}s — client log tail:"; grep -av "СТАТИСТИКА" "$LOG" | tail -20; down >/dev/null; return 1; }
-  dns=${DNS:-$(grep -aoE 'DNS: [0-9.]+' "$LOG" | head -1 | awk '{print $2}')}; dns=${dns:-1.1.1.1}
-  if [ "$mode" = tun ]; then tun_up "$tip"; return; fi
-  mkdir -p /etc/netns/$NS; echo "nameserver $dns" > /etc/netns/$NS/resolv.conf
+  local rdns=""; dns=$(grep -aoE 'DNS: [0-9.,]+' "$LOG" | head -1 | awk '{print $2}'); dns=${dns:-1.1.1.1}
+  case $dspec in default) ;; tls://* | https://*) rdns=$dspec;; *) dns=$dspec;; esac   # DoT/DoH: resolv.conf bootstraps a DoH host
+  if [ "$mode" = tun ]; then tun_up "$tip" "$dspec" "$mtu"; return; fi
+  mkdir -p /etc/netns/$NS; printf 'nameserver %s\n' ${dns//,/ } > /etc/netns/$NS/resolv.conf
   setsid python3 -I "$D/tunfd.py" $UDS $TUN "$tip/32" > "$RUN/tunfd.log" 2>&1 < /dev/null & echo $! > "$RUN/tunfd.pid"
   for i in $(seq 1 20); do ip link show $TUN >/dev/null 2>&1 && grep -q 'sent fd' "$RUN/tunfd.log" && break; sleep 0.5; done
-  ip link set $TUN netns $NS && nsx ip addr add "$tip/32" dev $TUN && nsx ip link set $TUN up && nsx ip route add default dev $TUN \
+  ip link set $TUN mtu "$mtu" && ip link set $TUN netns $NS && nsx ip addr add "$tip/32" dev $TUN && nsx ip link set $TUN up && nsx ip route add default dev $TUN \
     || { echo "could not move the TUN into netns $NS"; down >/dev/null; return 1; }
   # the listening socket is made here, in the host namespace; the server that inherits it runs in the netns, unprivileged
   setsid python3 -I -c 'import os, socket, sys
 s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(("127.0.0.1", int(sys.argv[1]))); s.listen(128)
 os.set_inheritable(s.fileno(), True); os.environ["CSQS_FD"] = str(s.fileno()); os.execvp("ip", ["ip", "netns", "exec"] + sys.argv[2:])' \
-    "$p" $NS "${asuser[@]}" python3 -I "$D/socks5.py" > "$RUN/socks.log" 2>&1 < /dev/null & echo $! > "$RUN/socks.pid"
+    "$p" $NS env CSQS_DNS="$rdns" "${asuser[@]}" python3 -I "$D/socks5.py" > "$RUN/socks.log" 2>&1 < /dev/null & echo $! > "$RUN/socks.pid"
   for i in $(seq 1 20); do grep -q serving "$RUN/socks.log" && break; sleep 0.25; done
   grep -q serving "$RUN/socks.log" || { echo "SOCKS server did not start:"; cat "$RUN/socks.log"; down >/dev/null; return 1; }
-  echo "up: tunnel $tip, DNS $dns — SOCKS5 on 127.0.0.1:$p (use socks5h:// so names resolve through the tunnel)"
+  echo "up: tunnel $tip, DNS ${rdns:-$dns} — SOCKS5 on 127.0.0.1:$p (use socks5h:// so names resolve through the tunnel)"
 }
 
 tun_up(){
-  local tip=$1 i
+  local tip=$1 dspec=$2 mtu=$3 i
   setsid python3 -I "$D/tunfd.py" $UDS $TUN "$tip/32" > "$RUN/tunfd.log" 2>&1 < /dev/null & echo $! > "$RUN/tunfd.pid"
   for i in $(seq 1 20); do ip link show $TUN >/dev/null 2>&1 && grep -q 'sent fd' "$RUN/tunfd.log" && break; sleep 0.5; done
   grep -q 'sent fd' "$RUN/tunfd.log" || { echo "the TUN did not come up:"; cat "$RUN/tunfd.log"; down >/dev/null; return 1; }
+  ip link set $TUN mtu "$mtu"
   # the kill switch first: the table's fallback is unreachable, so a vanished TUN blocks instead of leaking
   ip route add unreachable default metric 4096 table $TABLE
   ip route add default dev $TUN table $TABLE
   ip rule add lookup main suppress_prefixlength 0 pref 8985            # LAN and other specific routes stay reachable
   ip rule add lookup $TABLE pref 8990                                  # everything else: the tunnel
   ip route flush cache
-  echo "up (full tunnel): $TUN $tip, DNS stays $(awk '/^nameserver/{printf "%s ", $2}' /etc/resolv.conf)— now through the tunnel"
+  if [ "$dspec" = default ]; then
+    echo "up (full tunnel): $TUN $tip, DNS stays $(awk '/^nameserver/{printf "%s ", $2}' /etc/resolv.conf)— now through the tunnel"
+  else   # systemd-resolved: the TUN's own servers, and "~." so every name goes to them, not to the other links'
+    case $dspec in tls://*) resolvectl dns $TUN "${dspec#tls://}" && resolvectl dnsovertls $TUN yes;; *) resolvectl dns $TUN ${dspec//,/ };; esac \
+      && resolvectl domain $TUN '~.' && resolvectl default-route $TUN yes \
+      || { echo "could not set DNS $dspec on $TUN"; down >/dev/null; return 1; }
+    echo "up (full tunnel): $TUN $tip, DNS $dspec on $TUN (systemd-resolved)"
+  fi
   echo "exit IP: $(curl -s --max-time 15 https://ifconfig.me || echo '(no answer yet)')"
 }
 
@@ -105,6 +132,7 @@ status(){
     echo "exit IP: $(curl -s --max-time 15 https://ifconfig.me || echo '(no answer)')"
   fi
   alive socks && echo "socks: 127.0.0.1:$p" || echo "socks: not running"
+  echo "settings: $(opt all)"
   alive socks && echo "exit IP via proxy: $(curl -s --max-time 15 --socks5-hostname 127.0.0.1:"$p" https://ifconfig.me || echo '(no answer)')"
   [ -r "$LOG" ] && { echo "-- client log tail"; grep -av "СТАТИСТИКА" "$LOG" | tail -5; }
 }
@@ -114,11 +142,12 @@ down(){
     [ $f = client ] && pkill -P "$(cat "$RUN/$f.pid")" 2>/dev/null; kill "$(cat "$RUN/$f.pid")" 2>/dev/null; rm -f "$RUN/$f.pid"; done
   local pr; for pr in 8980 8985 8990; do while ip rule del pref $pr 2>/dev/null; do :; done; done
   ip route flush table $TABLE 2>/dev/null
+  resolvectl revert $TUN 2>/dev/null
   ip netns del $NS 2>/dev/null; rm -rf /etc/netns/$NS; ip link del $TUN 2>/dev/null; rm -f "$RUN/mode"; echo down
 }
 
 case "${1:-}" in
-  set) set_;;
+  set) shift; set_ "$@";;
   up) [ -n "${2:-}" ] && PORT=$2; asroot up; up socks;;
   tun) asroot tun; up tun;;
   down) asroot down; down;;
