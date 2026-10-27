@@ -23,7 +23,7 @@
 //
 //	for the tunnel (240; VK pauses 30–60 s on a flood), DEVID device id a 2.1 server binds the password to (csq-socks).
 //
-// 2.1 and 2.5 do not talk to each other: the link's form picks the client (client-2.1.9.exe or client-2.5.2.exe,
+// 2.1 and 2.5 do not talk to each other: the link's form picks the client (client-2.1.9.exe or client-2.5.3.exe,
 // next to this program). The connection lives in a background csq-socks process ("csq-socks daemon"), which holds
 // the client in a job object: the client goes when it goes.
 package main
@@ -481,7 +481,7 @@ func daemon(args []string) error {
 	}
 	client, v21 := "client-2.1.9.exe", []string{"--password", c.Password, "--device-id", env("DEVID", "csq-socks")}
 	if c.Line == "2.5" {
-		client, v21 = "client-2.5.2.exe", nil
+		client, v21 = "client-2.5.3.exe", nil
 	}
 	cargs := append([]string{"--peer", net.JoinHostPort(c.Host, c.Port), "--vk", strings.Join(c.Hashes, ",")}, v21...)
 	o := loadOpts().eff()

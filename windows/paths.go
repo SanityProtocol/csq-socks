@@ -84,9 +84,10 @@ func ownFolder(dir string) bool {
 	if err != nil {
 		return false
 	}
-	ours := map[string]bool{"csq-socks.exe": true, "client-2.5.2.exe": true, "client-2.1.9.exe": true, "wintun.dll": true,
+	ours := map[string]bool{"csq-socks.exe": true, "client-2.5.3.exe": true, "client-2.1.9.exe": true, "wintun.dll": true,
 		"README.md": true, "README.en.md": true, "LICENSE": true, "LICENSE-csqtt": true, "LICENSE-wintun.txt": true,
-		"NOTICE": true, "VERSION": true, "CLIENTS.sha256": true, "SHA256SUMS": true, "source": true, "data": true}
+		"NOTICE": true, "VERSION": true, "CLIENTS.sha256": true, "SHA256SUMS": true, "source": true, "data": true,
+		"client-2.5.2.exe": true} // 1.0.1's, left when this one is unpacked over it
 	for _, e := range ents {
 		if !ours[e.Name()] {
 			return false

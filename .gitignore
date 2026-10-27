@@ -1,8 +1,8 @@
 # the csqtt client binaries ship in the release archive, not in git (see CLIENTS.sha256 and release.sh)
 /client-2.1.9
-/client-2.5.2
+/client-2.5.3
 /dist/
 /windows/csq-socks.exe
 /client-2.1.9.exe
-/client-2.5.2.exe
+/client-2.5.3.exe
 /wintun.dll

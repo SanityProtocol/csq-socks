@@ -31,9 +31,10 @@ case "$miss" in "" | " python3-cryptography") ;; *) echo "missing:$miss — inst
 [ -z "$miss" ] || echo "note: python3-cryptography is missing (pip or your package manager) — 2.1 links work, 2.5 links need it"
 
 install -d -m 755 $DST $DST/source
-install -m 755 "$SRC"/install.sh "$SRC"/csq-socks "$SRC"/link.py "$SRC"/socks5.py "$SRC"/tunfd.py "$SRC"/client-2.5.2 "$SRC"/client-2.1.9 $DST/
+install -m 755 "$SRC"/install.sh "$SRC"/csq-socks "$SRC"/link.py "$SRC"/socks5.py "$SRC"/tunfd.py "$SRC"/client-2.5.3 "$SRC"/client-2.1.9 $DST/
 install -m 644 "$SRC"/README.md "$SRC"/README.en.md "$SRC"/LICENSE "$SRC"/LICENSE-csqtt "$SRC"/NOTICE "$SRC"/VERSION "$SRC"/CLIENTS.sha256 "$SRC"/SHA256SUMS $DST/
 install -m 644 "$SRC"/source/* $DST/source/
+rm -f $DST/client-2.5.2 $DST/source/client-2.5.2.patch /usr/local/lib/csq-socks/client-2.5.2   # 1.0.1's client, now client-2.5.3
 ln -sf $DST/csq-socks /usr/local/bin/csq-socks
 echo "csq-socks $(cat "$SRC/VERSION") installed in $DST"
 echo "next:  csq-socks set   (paste your csqtt:// link)"

@@ -2,11 +2,12 @@ The csq-socks release archives bundle two csqtt clients by amurcanov
 (csqtt is developed at https://github.com/Afteroid/csqttr):
 
   client-2.1.9  amurcanov's 2.1.9 client, unchanged.
-  client-2.5.2  the csqtt 2.5 client from Afteroid/csqttr main (commit 84187d6, which carries our
-                upload speed fix, Afteroid/csqttr#1) plus SanityProtocol's 2.5.2 client changes,
-                source/client-2.5.2.patch: battery fixes for an idle tunnel, a downlink wake fix and
-                their review fixes (offered upstream as Afteroid/csqttr#5).
-  On Windows: client-2.1.9.exe and client-2.5.2.exe, the same two sources built for Windows plus one
+  client-2.5.3  the client of SanityProtocol's csqtt 2.5.3: Afteroid/csqttr main (commit 84187d6, which
+                carries our upload speed fix, Afteroid/csqttr#1) plus SanityProtocol's client changes,
+                source/client-2.5.3.patch: battery fixes for an idle tunnel, a downlink wake fix and
+                their review fixes (offered upstream as Afteroid/csqttr#5). 2.5.3 changed the app and
+                the server only; the client is the one of 2.5.2.
+  On Windows: client-2.1.9.exe and client-2.5.3.exe, the same two sources built for Windows plus one
                 change each, source/client-<version>-windows-bind-ip.patch: --bind-ip, which binds the
                 client's own sockets to the physical network for csq-socks tun.
 
