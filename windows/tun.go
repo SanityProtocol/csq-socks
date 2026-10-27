@@ -4,14 +4,14 @@ package main
 // any default route), and its packets go to and from the client's UDP port. The client itself binds every socket to
 // the physical network's address (--bind-ip): Windows sends a bound socket out of the interface that owns the address,
 // past the tunnel's routes — the uid rule of tun on Linux. The kill switch is Windows Filtering Platform filters
-// (firewall/): everything but the tunnel, the client's exe, loopback, DHCP and the LAN is blocked, and the filters
+// (firewall/): everything but the tunnel, the client's exe (from the csq-socks folder, and only run elevated), loopback,
+// DHCP and the LAN is blocked, and the filters
 // stay until csq-socks down or a reboot, whatever happens to this process. -dns: an IP goes on the adapter; DoT/DoH
 // go through a forwarder on 127.0.0.1:53 here; with any DNS setting nothing else reaches a DNS server.
 
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -85,51 +85,25 @@ func physicalNet() (physical, error) {
 	return physical{}, fmt.Errorf("the default route's interface %s has no IPv4 address", iface.Alias())
 }
 
-// programDir: %ProgramFiles%\csq-socks, which only admins can write — by the known folder, not the environment
-// variable a user can set
-func programDir() string {
-	pf, err := windows.KnownFolderPath(windows.FOLDERID_ProgramFiles, 0)
-	if err != nil {
-		pf = `C:\Program Files`
-	}
-	return filepath.Join(pf, "csq-socks")
-}
-
-// the kill switch is on while this file exists: written once the filters are in, removed with them. Under
-// programDir, so only an admin can make it lie.
-func killSwitchMarker() string { return filepath.Join(programDir(), "killswitch.on") }
+// the kill switch is on while this file exists: written once the filters are in, removed with them (1.0.1's marker
+// in Program Files counts too until an elevated run carries it over)
+func killSwitchMarker() string { return filepath.Join(dataDir, "killswitch.on") }
 
 func killSwitchOn() bool {
-	_, err := os.Stat(killSwitchMarker())
-	return err == nil
+	if _, err := os.Stat(killSwitchMarker()); err == nil {
+		return true
+	}
+	if old := legacyProgramDir(); old != "" {
+		if _, err := os.Stat(filepath.Join(old, "killswitch.on")); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func liftKillSwitch() {
 	firewall.Disable()
 	os.Remove(killSwitchMarker())
-}
-
-// installClient: the client runs from programDir — the kill switch lets that exe through (when elevated), so it must
-// not be one anybody can replace (on Linux: /usr/local/lib/csq-socks)
-func installClient(name string) (string, error) {
-	src := filepath.Join(exeDir, name)
-	dir := programDir()
-	dst := filepath.Join(dir, name)
-	want, err := os.ReadFile(src)
-	if err != nil {
-		return "", err
-	}
-	if have, err := os.ReadFile(dst); err == nil && sha256.Sum256(have) == sha256.Sum256(want) {
-		return dst, nil
-	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", err
-	}
-	tmp := dst + ".new"
-	if err := os.WriteFile(tmp, want, 0o755); err != nil {
-		return "", err
-	}
-	return dst, os.Rename(tmp, dst)
 }
 
 // tunRun: from the first tunnel IP on. restart starts the client again bound to another physical address.
@@ -233,7 +207,7 @@ func tunRun(st *state, fail func(string) error, cl *clientRun, clientPath string
 	if err := firewall.Enable(uint64(luid), clientPath, setup); err != nil {
 		return cleanup("kill switch: " + err.Error())
 	}
-	os.WriteFile(killSwitchMarker(), []byte(time.Now().Format(time.RFC3339)+"\n"), 0o644)
+	os.WriteFile(killSwitchMarker(), []byte(time.Now().Format(time.RFC3339)+"\n"), 0o600)
 
 	if allowDNS != nil && adapterDNS[0] == loop {
 		// the forwarder's own connection goes out like any program's: through the tunnel

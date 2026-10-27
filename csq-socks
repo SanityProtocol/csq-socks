@@ -8,6 +8,8 @@
 #                          — settings, kept in settings.json beside it (a new link keeps them); with a link saved, no paste.
 #                            -dns: default (up: the server's DNS; tun: the system's, through the tunnel), an IP or
 #                            IP,IP, tls://IP[:PORT][#NAME] (DoT), https://URL (DoH, up only). -X default, or -reset for all.
+#   csq-socks set -hash H  — add VK call hashes to the saved link: space or comma separated, a …/call/join/<hash> link
+#                            as well; repeatable, duplicates skipped. Taken at the next up/tun.
 #   csq-socks up [PORT]    — connect (sudo); then use socks5h://127.0.0.1:PORT
 #   csq-socks tun          — connect as a full tunnel instead (sudo): ALL traffic goes through csqtt, no proxy to set.
 #                            The client runs as system user csqs, whose own traffic (VK, TURN) alone goes out directly;
@@ -31,13 +33,30 @@ alive(){ [ -f "$RUN/$1.pid" ] && [ -d "/proc/$(cat "$RUN/$1.pid")" ]; }   # /pro
 asuser=(setpriv --reuid="$U" --regid="$G" --init-groups)
 
 set_(){
-  local link conn new
-  if [ $# -gt 0 ]; then
-    new=$(cat "$OPT" 2>/dev/null | python3 -I "$D/link.py" opts "$@") || return 1
+  local link conn new n hs=() os=()
+  while [ $# -gt 0 ]; do
+    case $1 in
+      -hash|--hash) [ $# -ge 2 ] || { echo "-hash needs a value"; return 1; }; hs+=("$2"); shift 2;;
+      -hash=*|--hash=*) hs+=("${1#*=}"); shift;;
+      *) os+=("$1"); shift;;
+    esac
+  done
+  # all checked before anything is written
+  if [ ${#hs[@]} -gt 0 ]; then
+    [ -s "$CFG" ] || { echo "no link saved to add hashes to — run csq-socks set first"; return 1; }
+    n=$(field hashes | tr ',' '\n' | grep -c .)
+    conn=$(python3 -I "$D/link.py" addhash "${hs[@]}" < "$CFG") || return 1
+  fi
+  [ ${#os[@]} -eq 0 ] || new=$(cat "$OPT" 2>/dev/null | python3 -I "$D/link.py" opts "${os[@]}") || return 1
+  if [ ${#os[@]} -gt 0 ]; then
     mkdir -p "$(dirname "$OPT")"; (umask 077; printf '%s\n' "$new" > "$OPT")
     echo "settings: $(opt all)"
-    [ -s "$CFG" ] && return 0
   fi
+  if [ ${#hs[@]} -gt 0 ]; then
+    (umask 077; printf '%s\n' "$conn" > "$CFG")
+    echo "VK hashes: $(( $(field hashes | tr ',' '\n' | grep -c .) - n )) added, $(field hashes | tr ',' '\n' | grep -c .) in all — taken at the next csq-socks up/tun"
+  fi
+  if [ ${#hs[@]} -gt 0 ] || [ ${#os[@]} -gt 0 ]; then [ -s "$CFG" ] && return 0; fi
   echo "Paste the csqtt:// link, then Enter:"; IFS= read -r link || return 1
   conn=$(printf '%s' "$link" | python3 -I "$D/link.py" parse) || return 1
   mkdir -p "$(dirname "$CFG")"; (umask 077; printf '%s\n' "$conn" > "$CFG")

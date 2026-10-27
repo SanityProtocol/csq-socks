@@ -1,7 +1,7 @@
 #!/bin/bash
 # csq-socks installer: copies this folder (the unpacked release archive) to /opt/csq-socks and puts csq-socks on the PATH.
 #   sudo ./install.sh             install, or update in place
-#   sudo ./install.sh uninstall   disconnect and remove everything it installed
+#   sudo ./install.sh uninstall   disconnect and remove everything it installed, and the saved link of the user running it
 set -eu
 SRC=$(cd "$(dirname "$0")" && pwd); DST=/opt/csq-socks
 [ "$(id -u)" = 0 ] || exec sudo "$0" "$@"
@@ -10,7 +10,8 @@ if [ "${1:-}" = uninstall ]; then
   [ -x $DST/csq-socks ] && $DST/csq-socks down >/dev/null 2>&1 || true
   rm -rf $DST /usr/local/lib/csq-socks /run/csq-socks; rm -f /usr/local/bin/csq-socks
   id csqs >/dev/null 2>&1 && userdel csqs || true
-  echo "csq-socks removed (a saved link stays in ~/.config/csq-socks of the user who saved it)"; exit 0
+  h=$(getent passwd "${SUDO_USER:-root}" | cut -d: -f6); [ -n "$h" ] && rm -rf "$h/.config/csq-socks"
+  echo "csq-socks removed, with the link and settings saved in $h/.config/csq-socks"; exit 0
 fi
 
 [ "$(uname -s)/$(uname -m)" = Linux/x86_64 ] || { echo "csq-socks needs Linux on x86_64"; exit 1; }

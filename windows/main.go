@@ -3,17 +3,21 @@
 // userspace TCP/IP stack in this program is the other end of that port — so only what you point at the proxy uses the
 // tunnel; the machine's own routing is untouched, and no admin rights or driver are needed.
 //
-//	csq-socks set          — paste a csqtt:// link (2.1 plain or 2.5 sealed); saved to %APPDATA%\csq-socks\conn.json
+//	csq-socks set          — paste a csqtt:// link (2.1 plain or 2.5 sealed); saved to data\conn.json next to this
+//	                         program (paths.go: everything csq-socks keeps is in its folder)
 //	csq-socks set -mtu N -dns X -port N -streams N
 //	                       — settings, kept in settings.json beside it (a new link keeps them); with a link saved, no paste.
 //	                         -dns: default (the server's DNS), an IP or IP,IP, tls://IP[:PORT][#NAME] (DoT),
 //	                         https://URL (DoH). -X default, or -reset for all.
+//	csq-socks set -hash H  — add VK call hashes to the saved link: space or comma separated, a …/call/join/<hash> link
+//	                         as well; repeatable, duplicates skipped. Taken at the next up/tun.
 //	csq-socks up [PORT]    — connect; then use socks5h://127.0.0.1:PORT
 //	csq-socks tun          — connect as a full tunnel instead (admin terminal): ALL traffic goes through csqtt, no
 //	                         proxy to set; only the client's own VK/TURN traffic leaves directly. If the tunnel dies,
 //	                         traffic is blocked (kill switch) until csq-socks down. See tun.go.
 //	csq-socks status       — client state, tunnel address, exit IP through the proxy, log tail
-//	csq-socks down         — disconnect (after tun: from an admin terminal, it lifts the kill switch)
+//	csq-socks down         — disconnect (after tun: from an admin terminal, it lifts the kill switch). After that,
+//	                         deleting the folder removes csq-socks.
 //
 // env (one run, over the settings): PORT (1089), N client streams (10), MTU (1500), DNS (as -dns), WAIT seconds to wait
 //
@@ -48,14 +52,7 @@ import (
 	"golang.zx2c4.com/wireguard/tun/netstack"
 )
 
-const version = "1.0.1"
-
-var (
-	exeDir  string
-	cfgPath = filepath.Join(os.Getenv("APPDATA"), "csq-socks", "conn.json")
-	run     = filepath.Join(os.Getenv("LOCALAPPDATA"), "csq-socks")
-	logPath = filepath.Join(run, "client.log")
-)
+const version = "1.0.2"
 
 type state struct {
 	Pid    int      `json:"pid"`
@@ -69,8 +66,8 @@ type state struct {
 }
 
 func main() {
-	exe, _ := os.Executable()
-	exeDir = filepath.Dir(exe)
+	setPaths()
+	migrate()
 	args := os.Args[1:]
 	if len(args) == 0 {
 		args = []string{""}
@@ -128,35 +125,82 @@ func envInt(k string, def int) int {
 }
 
 func setLink(flags []string) error {
-	if len(flags) > 0 {
-		o, err := applyOpts(loadOpts(), flags)
-		if err != nil {
+	var hashArgs, optArgs []string
+	for i := 0; i < len(flags); i++ {
+		if k, v, eq := strings.Cut(strings.TrimLeft(flags[i], "-"), "="); k == "hash" {
+			if !eq {
+				if i+1 >= len(flags) {
+					return fmt.Errorf("-hash needs a value")
+				}
+				i++
+				v = flags[i]
+			}
+			hashArgs = append(hashArgs, v)
+			continue
+		}
+		optArgs = append(optArgs, flags[i])
+	}
+	// all checked before anything is written
+	var c conn
+	var hashes []string
+	if len(hashArgs) > 0 {
+		var err error
+		if hashes, err = parseHashes(hashArgs); err != nil {
 			return err
 		}
+		if c, err = loadConn(); err != nil {
+			return fmt.Errorf("no link saved to add hashes to — run csq-socks set first")
+		}
+	}
+	o, err := applyOpts(loadOpts(), optArgs)
+	if err != nil {
+		return err
+	}
+	if err := ensureData(); err != nil {
+		return err
+	}
+	if len(optArgs) > 0 {
 		if err := saveOpts(o); err != nil {
 			return err
 		}
 		fmt.Println("settings: " + o.String())
+	}
+	if len(hashes) > 0 {
+		n := c.addHashes(hashes)
+		if err := saveConn(c); err != nil {
+			return err
+		}
+		fmt.Printf("VK hashes: %d added, %d in all — taken at the next csq-socks up/tun\n", n, len(c.Hashes))
+	}
+	if len(flags) > 0 {
 		if b, err := os.ReadFile(cfgPath); err == nil && len(b) > 0 {
 			return nil
 		}
 	}
 	fmt.Println("Paste the csqtt:// link, then Enter:")
 	line, err := bufio.NewReaderSize(os.Stdin, 1<<16).ReadString('\n')
-	if err != nil && line == "" {
+	if err != nil && strings.TrimSpace(line) == "" {
+		if len(flags) > 0 {
+			return fmt.Errorf("no link pasted — only the settings are saved; run csq-socks set to paste it")
+		}
+		return fmt.Errorf("no link pasted — nothing saved")
+	}
+	if c, err = parseLink(line); err != nil {
 		return err
 	}
-	c, err := parseLink(line)
-	if err != nil {
+	if err := saveConn(c); err != nil {
+		return err
+	}
+	fmt.Printf("saved: csqtt %s server %s:%s, %d VK hash(es) — in %s\n", c.Line, c.Host, c.Port, len(c.Hashes), cfgPath)
+	return nil
+}
+
+func saveConn(c conn) error {
+	if err := ensureData(); err != nil {
 		return err
 	}
 	b, _ := json.Marshal(c)
-	os.MkdirAll(filepath.Dir(cfgPath), 0o700)
-	if err := os.WriteFile(cfgPath, append(b, '\n'), 0o600); err != nil {
-		return err
-	}
-	fmt.Printf("saved: csqtt %s server %s:%s, %d VK hash(es)\n", c.Line, c.Host, c.Port, len(c.Hashes))
-	return nil
+	return os.WriteFile(cfgPath, append(b, '\n'), 0o600)
 }
 
 func loadConn() (conn, error) {
@@ -235,7 +279,9 @@ func up(mode string) error {
 		}
 	}
 	stopDaemon()
-	os.MkdirAll(run, 0o700)
+	if err := ensureData(); err != nil {
+		return err
+	}
 	os.WriteFile(logPath, nil, 0o600)
 	self, _ := os.Executable()
 	cmd := exec.Command(self, "daemon", mode, strconv.Itoa(port))
@@ -328,6 +374,7 @@ func status() {
 	if ok && s.Mode != "tun" && alive(s.Pid) && s.Phase == "up" {
 		fmt.Printf("exit IP via proxy: %s\n", exitIP(s.Port))
 	}
+	fmt.Println("files: " + dataDir)
 	if _, err := os.Stat(logPath); err == nil {
 		fmt.Println("-- client log tail")
 		logTail(5)
@@ -368,19 +415,33 @@ func logTail(n int) {
 func down() {
 	stopDaemon()
 	if elevated() {
+		legacyCleanup()
 		liftKillSwitch()
 	}
 }
 
 func stopDaemon() {
-	if s, ok := readState(); ok && alive(s.Pid) {
-		if h, err := windows.OpenProcess(windows.PROCESS_TERMINATE|windows.SYNCHRONIZE, false, uint32(s.Pid)); err == nil {
-			windows.TerminateProcess(h, 0) // the job object takes the client with it, the adapter goes with us
-			windows.WaitForSingleObject(h, 5000)
-			windows.CloseHandle(h)
+	if legacyRun != "" { // a connection 1.0.1 started
+		if b, err := os.ReadFile(filepath.Join(legacyRun, "state.json")); err == nil {
+			var s state
+			if json.Unmarshal(b, &s) == nil && alive(s.Pid) {
+				killPid(s.Pid)
+			}
+			os.RemoveAll(legacyRun)
 		}
 	}
+	if s, ok := readState(); ok && alive(s.Pid) {
+		killPid(s.Pid)
+	}
 	os.Remove(filepath.Join(run, "state.json"))
+}
+
+func killPid(pid int) {
+	if h, err := windows.OpenProcess(windows.PROCESS_TERMINATE|windows.SYNCHRONIZE, false, uint32(pid)); err == nil {
+		windows.TerminateProcess(h, 0) // the job object takes the client with it, the adapter goes with us
+		windows.WaitForSingleObject(h, 5000)
+		windows.CloseHandle(h)
+	}
 }
 
 // killOnClose: a job whose last handle closing (this process ending, however it ends) kills every process in it
@@ -425,7 +486,7 @@ func daemon(args []string) error {
 	cargs := append([]string{"--peer", net.JoinHostPort(c.Host, c.Port), "--vk", strings.Join(c.Hashes, ",")}, v21...)
 	o := loadOpts().eff()
 	cargs = append(cargs, "-n", env("N", strconv.Itoa(o.Streams)), "--listen", "127.0.0.1:0")
-	clientPath := filepath.Join(exeDir, client)
+	clientPath := filepath.Join(exeDir, client) // tun too: the kill switch lets this exe through, run elevated
 	var ph physical
 	start := func(bind netip.Addr) (*clientRun, error) {
 		a := cargs
@@ -435,10 +496,8 @@ func daemon(args []string) error {
 		return startClient(clientPath, a, c.Password)
 	}
 	if mode == "tun" {
+		legacyCleanup()
 		if ph, err = physicalNet(); err != nil {
-			return fail(err.Error())
-		}
-		if clientPath, err = installClient(client); err != nil {
 			return fail(err.Error())
 		}
 	}

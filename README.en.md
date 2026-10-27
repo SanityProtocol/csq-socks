@@ -18,7 +18,7 @@ The same command updates an installed copy. Without internet on that machine: do
 [Releases](https://github.com/SanityProtocol/csq-socks/releases), copy it over, then
 `tar xzf csq-socks.tar.gz && sudo csq-socks/install.sh`.
 
-Remove: `sudo /opt/csq-socks/install.sh uninstall`.
+Remove: `sudo /opt/csq-socks/install.sh uninstall` — the saved link and settings (`~/.config/csq-socks`) go with it.
 
 ## Use
 
@@ -48,6 +48,7 @@ not leaked, until `csq-socks down`. Turn other VPNs off first: while `tun` is up
 csq-socks set -mtu 1400 -dns tls://9.9.9.9#dns.quad9.net   # with a link saved, only the settings change
 csq-socks set -dns default                                  # one setting back to its default
 csq-socks set -reset                                        # all of them
+csq-socks set -hash "HASH1 HASH2,HASH3"                      # add VK call hashes to the saved link
 ```
 
 | setting | default | |
@@ -58,6 +59,9 @@ csq-socks set -reset                                        # all of them
 | `-streams` | 10 | 3–100 parallel csqtt streams |
 
 The settings stay in `~/.config/csq-socks/settings.json`; a new link keeps them. `csq-socks status` shows them.
+
+`-hash` adds VK call hashes to the link already saved: space or comma separated, or as a call link
+(`…/call/join/<hash>`); the flag can repeat, duplicates are skipped. They are taken at the next `up`/`tun`.
 
 ## Good to know
 
@@ -77,7 +81,7 @@ anywhere (say `C:\csq-socks`), and run it from a terminal in that folder — not
 settings as on Linux:
 
 ```powershell
-.\csq-socks set      # paste your csqtt:// link (saved in %APPDATA%\csq-socks)
+.\csq-socks set      # paste your csqtt:// link (saved in the data folder next to csq-socks.exe)
 .\csq-socks up       # SOCKS5 proxy on 127.0.0.1:1089 — no admin rights needed
 .\csq-socks tun      # or: ALL traffic through the tunnel — from an admin terminal (Run as administrator)
 .\csq-socks status
@@ -86,8 +90,11 @@ settings as on Linux:
 
 - `up` changes nothing on the system, as on Linux: point a browser or app at `127.0.0.1:1089` (SOCKS v5, DNS through
   the proxy).
-- `tun` adds a network adapter named `csq-socks` and routes everything through it. The csqtt client is copied to
-  `C:\Program Files\csq-socks` and only its own VK traffic goes out directly. The kill switch blocks everything else
+- Everything csq-socks keeps (link, settings, log) is in the `data` folder next to `csq-socks.exe`, and only you (and
+  the system and administrators) can open the csq-socks folder. To remove it: `csq-socks down` (after `tun`, from an
+  admin terminal), then delete the folder. Under `Program Files` the files go to `%LOCALAPPDATA%\csq-socks`.
+- `tun` adds a network adapter named `csq-socks` and routes everything through it. Only the csqtt client's own VK
+  traffic goes out directly. The kill switch blocks everything else
   (your local network stays reachable) if the tunnel drops, even if csq-socks itself is closed, until
   `csq-socks down` — or a restart. In `tun` every `-dns` form works, DoT and DoH included.
 - Another network (Wi-Fi to cable, a new address): `tun` follows it on its own — traffic stays blocked for the few

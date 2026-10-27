@@ -4,10 +4,12 @@
 #   link.py get FIELD  — read that JSON on stdin, print one field (hashes comma-joined)
 #   link.py opts FLAG… — read the settings JSON on stdin (may be empty), apply `csq-socks set` flags, print the result
 #   link.py opt NAME   — read the settings JSON on stdin, print that setting (its default when unset); `opt all` = one line
+#   link.py addhash H… — read the connection JSON on stdin, add VK call hashes (space/comma separated, or a
+#                        …/call/join/<hash> link; duplicates skipped), print the result
 # Two link forms (swg-panel turn-artifacts.js csqttArtifact, the 2.5 server's encrypt_csqtt_link):
 #   2.1: csqtt://connect?v=2&host=&peer=&password=&hashes=a+b   ('+' joins hashes, a literal '+' is %2B)
 #   2.5: csqtt://<base64url(iv12 ‖ AES-256-GCM(payload) ‖ tag)>, key SHA-256("csqtt-chiper-key"), payload = the 2.1 query
-import base64, hashlib, ipaddress, json, sys
+import base64, hashlib, ipaddress, json, re, sys
 from urllib.parse import unquote, urlsplit
 
 SEED = b"csqtt-chiper-key"   # sic — the csqtt authors' spelling
@@ -115,6 +117,26 @@ def load(f):
     t = f.read().strip()
     return json.loads(t) if t else {}
 
+HASH = re.compile(r"^[A-Za-z0-9_+=.-]{10,}$")
+
+def addhash(c, args):
+    new = []
+    for a in args:
+        for h in re.split(r"[\s,]+", a.strip()):
+            if not h:
+                continue
+            if "/call/join/" in h:
+                h = h.split("/call/join/", 1)[1].split("?")[0].split("#")[0].rstrip("/")
+            if not HASH.match(h):
+                sys.exit("-hash: %r is not a VK call hash (or a …/call/join/<hash> link)" % h)
+            new.append(h)
+    if not new:
+        sys.exit("-hash needs a VK call hash")
+    for h in new:
+        if h not in c["hashes"]:
+            c["hashes"].append(h)
+    return c
+
 if __name__ == "__main__":
     if sys.argv[1:2] == ["opts"]:
         print(json.dumps(opts(load(sys.stdin), sys.argv[2:])))
@@ -123,8 +145,10 @@ if __name__ == "__main__":
         print(" · ".join("%s %s" % kv for kv in o.items()) if sys.argv[2] == "all" else o[sys.argv[2]])
     elif sys.argv[1:] == ["parse"]:
         print(json.dumps(parse(sys.stdin.read())))
+    elif sys.argv[1:2] == ["addhash"]:
+        print(json.dumps(addhash(json.load(sys.stdin), sys.argv[2:])))
     elif len(sys.argv) == 3 and sys.argv[1] == "get":
         v = json.load(sys.stdin).get(sys.argv[2], "")
         print(",".join(v) if isinstance(v, list) else v)
     else:
-        sys.exit("usage: link.py parse | link.py get FIELD | link.py opts FLAG… | link.py opt NAME")
+        sys.exit("usage: link.py parse | link.py get FIELD | link.py opts FLAG… | link.py opt NAME | link.py addhash H…")

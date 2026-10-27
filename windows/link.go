@@ -11,7 +11,9 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"unicode"
@@ -90,4 +92,44 @@ func parseLink(link string) (conn, error) {
 		return conn{}, errors.New("the link carries no VK call hashes — add a VK call link to this user in the panel first")
 	}
 	return c, nil
+}
+
+// csq-socks set -hash: VK call hashes to add, space or comma separated; a …/call/join/<hash> link gives its hash
+var reHash = regexp.MustCompile(`^[A-Za-z0-9_+=.-]{10,}$`)
+
+func parseHashes(vals []string) ([]string, error) {
+	var out []string
+	for _, v := range vals {
+		for _, h := range strings.FieldsFunc(v, func(r rune) bool { return r == ',' || unicode.IsSpace(r) }) {
+			if i := strings.Index(h, "/call/join/"); i >= 0 {
+				h = h[i+len("/call/join/"):]
+				h = strings.TrimRight(strings.SplitN(strings.SplitN(h, "?", 2)[0], "#", 2)[0], "/")
+			}
+			if !reHash.MatchString(h) {
+				return nil, fmt.Errorf("-hash: %q is not a VK call hash (or a …/call/join/<hash> link)", h)
+			}
+			out = append(out, h)
+		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("-hash needs a VK call hash")
+	}
+	return out, nil
+}
+
+// addHashes: the new ones, in order, none twice; how many were new
+func (c *conn) addHashes(hs []string) int {
+	have := map[string]bool{}
+	for _, h := range c.Hashes {
+		have[h] = true
+	}
+	n := 0
+	for _, h := range hs {
+		if !have[h] {
+			have[h] = true
+			c.Hashes = append(c.Hashes, h)
+			n++
+		}
+	}
+	return n
 }

@@ -9,12 +9,9 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 )
-
-var optPath = filepath.Join(os.Getenv("APPDATA"), "csq-socks", "settings.json")
 
 type settings struct {
 	MTU     int    `json:"mtu,omitempty"`
@@ -157,7 +154,9 @@ func applyOpts(o settings, args []string) (settings, error) {
 }
 
 func saveOpts(o settings) error {
+	if err := ensureData(); err != nil {
+		return err
+	}
 	b, _ := json.Marshal(o)
-	os.MkdirAll(filepath.Dir(optPath), 0o700)
 	return os.WriteFile(optPath, append(b, '\n'), 0o600)
 }
