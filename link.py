@@ -43,9 +43,21 @@ def parse(link):
         sys.exit("the link has no host or port")
     if not c["password"]:
         sys.exit("the link has no password")
-    if not hashes:
-        sys.exit("the link carries no VK call hashes — add a VK call link to this user in the panel first")
-    return c
+    if not reachable(c["host"]):
+        sys.exit("the link's server address %s is a private address (the server's own network or a tunnel), which VK's"
+                 " relays cannot reach — copy the link from the server's panel opened by its public address" % c["host"])
+    return c   # no hashes (a link with a VK token, or one a participant adds their own to): `set` says to add them
+
+PRIVATE = [ipaddress.ip_network(n) for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7")]
+
+def reachable(host):
+    if host.lower() == "localhost":
+        return False
+    try:
+        a = ipaddress.ip_address(host)
+    except ValueError:
+        return True   # a name
+    return not (a.is_loopback or a.is_unspecified or a.is_link_local or any(a in n for n in PRIVATE))
 
 # csq-socks set -mtu N -dns X -port N -streams N (-X default = back to the default, -reset = all of them)
 DEFAULTS = {"mtu": 1500, "dns": "default", "port": 1089, "streams": 10}

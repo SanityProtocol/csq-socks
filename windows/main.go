@@ -52,7 +52,7 @@ import (
 	"golang.zx2c4.com/wireguard/tun/netstack"
 )
 
-const version = "1.0.2"
+const version = "1.0.3"
 
 type state struct {
 	Pid    int      `json:"pid"`
@@ -192,6 +192,9 @@ func setLink(flags []string) error {
 		return err
 	}
 	fmt.Printf("saved: csqtt %s server %s:%s, %d VK hash(es) — in %s\n", c.Line, c.Host, c.Port, len(c.Hashes), cfgPath)
+	if len(c.Hashes) == 0 {
+		fmt.Println("the link carries no VK call hashes — add yours: csq-socks set -hash HASH")
+	}
 	return nil
 }
 
@@ -257,6 +260,9 @@ func up(mode string) error {
 	c, err := loadConn()
 	if err != nil {
 		return err
+	}
+	if len(c.Hashes) == 0 {
+		return fmt.Errorf("the saved link has no VK call hashes — add yours: csq-socks set -hash HASH")
 	}
 	if s, ok := readState(); ok && alive(s.Pid) {
 		return fmt.Errorf("already up (%s) — csq-socks down first", s.Mode)
@@ -324,8 +330,19 @@ func up(mode string) error {
 	}
 	fmt.Printf("no tunnel after %ds — client log tail:\n", wait)
 	logTail(20)
+	if b, err := os.ReadFile(logPath); err == nil && noReply(string(b)) {
+		fmt.Printf("the server never answered — a csqtt %s link reaches only a %s server, and 2.1 and 2.5 do not talk to\n"+
+			"each other: if this server runs the other version, get its current link and run csq-socks set\n", c.Line, c.Line)
+	}
 	giveUp(mode, ks)
 	return fmt.Errorf("not connected")
+}
+
+// noReply: every session's handshake got nothing back ("входящих 0") — most often a 2.5 link to a 2.1 server or the reverse
+var reIncoming = regexp.MustCompile(`входящих [1-9]`)
+
+func noReply(log string) bool {
+	return strings.Contains(log, "входящих 0") && !reIncoming.MatchString(log)
 }
 
 // giveUp: a tun that did not connect leaves the kill switch as it found it — on if an earlier tun left it on

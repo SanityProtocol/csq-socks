@@ -62,6 +62,8 @@ The settings stay in `~/.config/csq-socks/settings.json`; a new link keeps them.
 
 `-hash` adds VK call hashes to the link already saved: space or comma separated, or as a call link
 (`…/call/join/<hash>`); the flag can repeat, duplicates are skipped. They are taken at the next `up`/`tun`.
+A link without hashes (one with a VK token, or for a participant who adds their own) is saved too: add hashes with
+`-hash` — `up` and `tun` do not start without them.
 
 ## Good to know
 

@@ -12,6 +12,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -88,10 +89,22 @@ func parseLink(link string) (conn, error) {
 	if c.Password == "" {
 		return conn{}, errors.New("the link has no password")
 	}
-	if len(c.Hashes) == 0 {
-		return conn{}, errors.New("the link carries no VK call hashes — add a VK call link to this user in the panel first")
+	if !reachable(c.Host) {
+		return conn{}, fmt.Errorf("the link's server address %s is a private address (the server's own network or a tunnel), "+
+			"which VK's relays cannot reach — copy the link from the server's panel opened by its public address", c.Host)
 	}
-	return c, nil
+	return c, nil // no hashes (a link with a VK token, or one a participant adds their own to): set says to add them
+}
+
+func reachable(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return false
+	}
+	ip, err := netip.ParseAddr(host)
+	if err != nil {
+		return true // a name
+	}
+	return !(ip.IsLoopback() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() || ip.IsPrivate())
 }
 
 // csq-socks set -hash: VK call hashes to add, space or comma separated; a …/call/join/<hash> link gives its hash

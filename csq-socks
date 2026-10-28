@@ -61,6 +61,14 @@ set_(){
   conn=$(printf '%s' "$link" | python3 -I "$D/link.py" parse) || return 1
   mkdir -p "$(dirname "$CFG")"; (umask 077; printf '%s\n' "$conn" > "$CFG")
   echo "saved: csqtt $(field line) server $(field host):$(field port), $(field hashes | tr ',' '\n' | grep -c .) VK hash(es)"
+  [ -n "$(field hashes)" ] || echo "the link carries no VK call hashes — add yours: csq-socks set -hash HASH"
+}
+
+# the server never answered (every session "входящих 0"): most often a 2.5 link to a 2.1 server or the reverse
+noreply(){
+  grep -aq 'входящих 0' "$LOG" && ! grep -aqE 'входящих [1-9]' "$LOG" || return 0
+  echo "the server never answered — a csqtt $(field line) link reaches only a $(field line) server, and 2.1 and 2.5 do not talk to"
+  echo "each other: if this server runs the other version, get its current link and run csq-socks set"
 }
 
 up(){   # $1 = socks | tun
@@ -76,6 +84,7 @@ up(){   # $1 = socks | tun
   [ "$mode" = tun ] || ! ss -Hltn "sport = :$p" | grep -q . || { echo "port $p is in use — pick another: csq-socks up PORT"; return 1; }
   local line host pport pw vk client v21=() peer tip dns i bin runas
   line=$(field line) host=$(field host) pport=$(field port) pw=$(field password) vk=$(field hashes)
+  [ -n "$vk" ] || { echo "the saved link has no VK call hashes — add yours: csq-socks set -hash HASH"; return 1; }
   case $host in *:*) peer="[$host]:$pport";; *) peer="$host:$pport";; esac
   if [ "$line" = 2.5 ]; then client=client-2.5.3; else client=client-2.1.9; v21=(--password "$pw" --device-id "${DEVID:-csq-socks}"); fi
   down >/dev/null 2>&1
@@ -99,7 +108,7 @@ up(){   # $1 = socks | tun
   for i in $(seq 1 "${WAIT:-240}"); do
     tip=$(grep -aoE 'Tunnel IP: [0-9.]+' "$LOG" | head -1 | awk '{print $3}'); [ -n "$tip" ] && break
     alive client || break; sleep 1; done
-  [ -n "$tip" ] || { echo "no tunnel after ${i}s — client log tail:"; grep -av "СТАТИСТИКА" "$LOG" | tail -20; down >/dev/null; return 1; }
+  [ -n "$tip" ] || { echo "no tunnel after ${i}s — client log tail:"; grep -av "СТАТИСТИКА" "$LOG" | tail -20; noreply; down >/dev/null; return 1; }
   local rdns=""; dns=$(grep -aoE 'DNS: [0-9.,]+' "$LOG" | head -1 | awk '{print $2}'); dns=${dns:-1.1.1.1}
   case $dspec in default) ;; tls://* | https://*) rdns=$dspec;; *) dns=$dspec;; esac   # DoT/DoH: resolv.conf bootstraps a DoH host
   if [ "$mode" = tun ]; then tun_up "$tip" "$dspec" "$mtu"; return; fi
