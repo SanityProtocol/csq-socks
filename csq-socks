@@ -111,7 +111,7 @@ up(){   # $1 = socks | tun
   [ -n "$tip" ] || { echo "no tunnel after ${i}s — client log tail:"; grep -av "СТАТИСТИКА" "$LOG" | tail -20; noreply; down >/dev/null; return 1; }
   local rdns=""; dns=$(grep -aoE 'DNS: [0-9.,]+' "$LOG" | head -1 | awk '{print $2}'); dns=${dns:-1.1.1.1}
   case $dspec in default) ;; tls://* | https://*) rdns=$dspec;; *) dns=$dspec;; esac   # DoT/DoH: resolv.conf bootstraps a DoH host
-  if [ "$mode" = tun ]; then tun_up "$tip" "$dspec" "$mtu"; return; fi
+  if [ "$mode" = tun ]; then tun_up "$tip" "$dspec" "$mtu" "$dns"; return; fi
   mkdir -p /etc/netns/$NS; printf 'nameserver %s\n' ${dns//,/ } > /etc/netns/$NS/resolv.conf
   setsid python3 -I "$D/tunfd.py" $UDS $TUN "$tip/32" > "$RUN/tunfd.log" 2>&1 < /dev/null & echo $! > "$RUN/tunfd.pid"
   for i in $(seq 1 20); do ip link show $TUN >/dev/null 2>&1 && grep -q 'sent fd' "$RUN/tunfd.log" && break; sleep 0.5; done
@@ -128,7 +128,7 @@ os.set_inheritable(s.fileno(), True); os.environ["CSQS_FD"] = str(s.fileno()); o
 }
 
 tun_up(){
-  local tip=$1 dspec=$2 mtu=$3 i
+  local tip=$1 dspec=$2 mtu=$3 srvdns=${4:-} i
   setsid python3 -I "$D/tunfd.py" $UDS $TUN "$tip/32" > "$RUN/tunfd.log" 2>&1 < /dev/null & echo $! > "$RUN/tunfd.pid"
   for i in $(seq 1 20); do ip link show $TUN >/dev/null 2>&1 && grep -q 'sent fd' "$RUN/tunfd.log" && break; sleep 0.5; done
   grep -q 'sent fd' "$RUN/tunfd.log" || { echo "the TUN did not come up:"; cat "$RUN/tunfd.log"; down >/dev/null; return 1; }
@@ -140,7 +140,13 @@ tun_up(){
   ip rule add lookup $TABLE pref 8990                                  # everything else: the tunnel
   ip route flush cache
   if [ "$dspec" = default ]; then
-    echo "up (full tunnel): $TUN $tip, DNS stays $(awk '/^nameserver/{printf "%s ", $2}' /etc/resolv.conf)— now through the tunnel"
+    if command -v resolvectl >/dev/null && systemctl is-active -q systemd-resolved && [ -n "$srvdns" ]; then
+      resolvectl dns $TUN ${srvdns//,/ } && resolvectl domain $TUN '~.' && resolvectl default-route $TUN yes \
+        || { echo "could not set DNS $srvdns on $TUN"; down >/dev/null; return 1; }
+      echo "up (full tunnel): $TUN $tip, DNS $srvdns on $TUN (systemd-resolved from server)"
+    else
+      echo "up (full tunnel): $TUN $tip, DNS stays $(awk '/^nameserver/{printf "%s ", $2}' /etc/resolv.conf)— now through the tunnel"
+    fi
   else   # systemd-resolved: the TUN's own servers, and "~." so every name goes to them, not to the other links'
     case $dspec in tls://*) resolvectl dns $TUN "${dspec#tls://}" && resolvectl dnsovertls $TUN yes;; *) resolvectl dns $TUN ${dspec//,/ };; esac \
       && resolvectl domain $TUN '~.' && resolvectl default-route $TUN yes \
