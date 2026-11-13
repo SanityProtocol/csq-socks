@@ -19,5 +19,12 @@ Both clients, and the patches as changes to them, are licensed under the PolyFor
 License 1.0.0 (LICENSE-csqtt): free to use and share for non-commercial purposes only.
 Their SHA-256 hashes are in CLIENTS.sha256.
 
+csq-socks.exe includes gVisor's netstack (gvisor.dev/gvisor, Apache License 2.0, Copyright The gVisor Authors) with
+one change, source/gvisor-tcp-undo.patch: its TCP undoes the window cut of a recovery it finds spurious, so packets the
+csqtt workers deliver out of order no longer hold the upload of `csq-socks up` near 3 Mbit/s.
+LICENSE-csq-socks-exe.txt (in the Windows archive) carries the licences of everything compiled into csq-socks.exe:
+Go (BSD-3-Clause, with its patent grant), gVisor and google/btree (Apache License 2.0), wireguard-go, wireguard-windows
+and the wintun Go package (MIT), golang.org/x/net, x/sys and x/time (BSD-3-Clause).
+
 windows/firewall is adapted from wireguard-windows (MIT, Copyright (C) 2019-2021 WireGuard LLC).
 Everything else in this repository is MIT-licensed (LICENSE).

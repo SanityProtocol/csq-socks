@@ -7,3 +7,5 @@
 /client-2.5.3.exe
 /wintun.dll
 __pycache__/
+/windows/vendor/
+/windows/LICENSE-csq-socks-exe.txt

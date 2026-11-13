@@ -52,7 +52,7 @@ import (
 	"golang.zx2c4.com/wireguard/tun/netstack"
 )
 
-const version = "1.0.3"
+const version = "1.0.4"
 
 type state struct {
 	Pid    int      `json:"pid"`

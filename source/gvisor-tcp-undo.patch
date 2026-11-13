@@ -1,0 +1,114 @@
+csq-socks.exe (Windows `up`) runs gVisor's netstack TCP over the csqtt tunnel. The client's workers deliver packets
+out of order, gVisor's RACK marks them lost and retransmits, and although it finds those recoveries spurious (RFC 3522,
+timestamps) it never undoes the window cut: upload stayed near 3 Mbit/s on a line that carries 20. This patch, applied
+by release.sh to the vendored gvisor.dev/gvisor v0.0.0-20250503011706-39ed1f5ac29c, saves cwnd and ssthresh before each
+loss-triggered reduction and restores them when the recovery proves spurious (not after a timeout), as Linux does.
+Apache License 2.0, as gVisor.
+
+--- a/pkg/tcpip/transport/tcp/snd.go
++++ b/pkg/tcpip/transport/tcp/snd.go
+@@ -176,6 +176,13 @@
+ 	// RFC3522 Section 3.2.
+ 	retransmitTS uint32
+ 
++	// priorCwnd and priorSsthresh are cwnd and ssthresh before the last
++	// loss-triggered reduction, restored if RFC 3522 finds the recovery
++	// spurious; undone records that this recovery's reduction was undone.
++	priorCwnd     int
++	priorSsthresh int
++	undone        bool
++
+ 	// startCork start corking the segments.
+ 	startCork bool
+ 
+@@ -1127,6 +1134,7 @@
+ 	// See: https://www.rfc-editor.org/rfc/rfc3522.html#section-3.2 Step 1.
+ 	s.spuriousRecovery = false
+ 	s.retransmitTS = 0
++	s.undone = false
+ 
+ 	s.FastRecovery.Active = true
+ 	// Save state to reflect we're now in fast recovery.
+@@ -1163,6 +1171,15 @@
+ 	s.ep.stack.Stats().TCP.FastRecovery.Increment()
+ }
+ 
++// saveUndo records cwnd and ssthresh before a loss-triggered reduction.
++//
++// +checklocks:s.ep.mu
++func (s *sender) saveUndo() {
++	s.priorCwnd = s.SndCwnd
++	s.priorSsthresh = s.Ssthresh
++	s.undone = false
++}
++
+ // +checklocks:s.ep.mu
+ func (s *sender) leaveRecovery() {
+ 	s.FastRecovery.Active = false
+@@ -1171,6 +1188,11 @@
+ 
+ 	// Deflate cwnd. It had been artificially inflated when new dups arrived.
+ 	s.SndCwnd = s.Ssthresh
++	if s.undone {
++		// The reduction was undone: keep the restored window, never one
++		// set from a restored (possibly initial, MaxInt) ssthresh.
++		s.SndCwnd = s.priorCwnd
++	}
+ 	s.cc.PostRecovery()
+ }
+ 
+@@ -1296,6 +1318,7 @@
+ 		s.DupAckCount = 0
+ 		return false
+ 	}
++	s.saveUndo()
+ 	s.cc.HandleLossDetected()
+ 	s.enterRecovery()
+ 	return true
+@@ -1500,6 +1523,20 @@
+ 	s.spuriousRecovery = true
+ 	s.ep.stack.Stats().TCP.SpuriousRecovery.Increment()
+ 
++	// Undo the window reduction of a spurious fast or SACK recovery, as
++	// Linux does (tcp_undo_cwnd_reduction): packets that arrive out of
++	// order are not lost, and without the undo reordering alone halves
++	// cwnd several times a second.
++	if s.state != tcpip.RTORecovery && s.priorCwnd > 0 && !s.undone {
++		s.undone = true
++		if s.priorSsthresh > s.Ssthresh {
++			s.Ssthresh = s.priorSsthresh
++		}
++		if s.priorCwnd > s.SndCwnd {
++			s.SndCwnd = s.priorCwnd
++		}
++	}
++
+ 	// RFC 3522 will detect all kinds of spurious recoveries (fast, SACK and
+ 	// timeout). Increment the metric for RTO only as we want to track the
+ 	// number of timeout recoveries.
+@@ -1758,6 +1795,7 @@
+ 			// If any segment is marked as lost by
+ 			// RACK, enter recovery and retransmit
+ 			// the lost segments.
++			s.saveUndo()
+ 			s.cc.HandleLossDetected()
+ 			s.enterRecovery()
+ 			fastRetransmit = true
+--- a/pkg/tcpip/transport/tcp/rack.go
++++ b/pkg/tcpip/transport/tcp/rack.go
+@@ -267,6 +267,7 @@
+ 			// Step 2. Either the original packet or the retransmission (in the
+ 			// form of a probe) was lost. Invoke a congestion control response
+ 			// equivalent to fast recovery.
++			s.saveUndo()
+ 			s.cc.HandleLossDetected()
+ 			s.enterRecovery()
+ 			s.leaveRecovery()
+@@ -407,6 +408,7 @@
+ 
+ 	fastRetransmit := false
+ 	if !rc.snd.FastRecovery.Active {
++		rc.snd.saveUndo()
+ 		rc.snd.cc.HandleLossDetected()
+ 		rc.snd.enterRecovery()
+ 		fastRetransmit = true

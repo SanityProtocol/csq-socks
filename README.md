@@ -116,4 +116,5 @@ csq-socks set -hash "ХЕШ1 ХЕШ2,ХЕШ3"                         # доба
 Скрипты csq-socks — под лицензией MIT (`LICENSE`). Два клиента csqtt в архивах релиза принадлежат amurcanov и
 распространяются под PolyForm Noncommercial License — только для некоммерческого использования (`NOTICE`,
 `LICENSE-csqtt`). В git их нет: `release.sh` собирает архивы из этого репозитория и бинарных файлов, сверяя их
-с `CLIENTS.sha256`.
+с `CLIENTS.sha256`. На Windows в `csq-socks.exe` собраны, среди прочего, Go, gVisor и wireguard-go: их лицензии — в
+`LICENSE-csq-socks-exe.txt`.

@@ -110,4 +110,5 @@ settings as on Linux:
 
 The csq-socks scripts are MIT (`LICENSE`). The two csqtt clients in the release archives are amurcanov's, under the
 PolyForm Noncommercial License — non-commercial use only (`NOTICE`, `LICENSE-csqtt`). They are not in git:
-`release.sh` builds the archives from this repository plus the binaries, checked against `CLIENTS.sha256`.
+`release.sh` builds the archives from this repository plus the binaries, checked against `CLIENTS.sha256`. On Windows,
+`csq-socks.exe` contains Go, gVisor and wireguard-go among others: their licences are in `LICENSE-csq-socks-exe.txt`.
